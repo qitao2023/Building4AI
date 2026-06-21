@@ -1,0 +1,52 @@
+{
+  "project": "AI Designed Test Structure",
+  "elements": [
+    {
+      "action": "create",
+      "ifc_type": "IfcColumn",
+      "name": "KZ1",
+      "storey": "Level 1",
+      "properties": {
+        "Width": 500,
+        "Depth": 500,
+        "Height": 4000
+      },
+      "material": "C40"
+    },
+    {
+      "action": "create",
+      "ifc_type": "IfcColumn",
+      "name": "KZ2",
+      "storey": "Level 1",
+      "properties": {
+        "Width": 500,
+        "Depth": 500,
+        "Height": 4000
+      },
+      "material": "C40"
+    },
+    {
+      "action": "create",
+      "ifc_type": "IfcBeam",
+      "name": "KL1",
+      "storey": "Level 1",
+      "properties": {
+        "Width": 300,
+        "Depth": 700,
+        "Length": 6000
+      },
+      "material": "C30"
+    },
+    {
+      "action": "create",
+      "ifc_type": "IfcSlab",
+      "name": "B1",
+      "storey": "Level 1",
+      "properties": {
+        "Thickness": 150,
+        "Area": 36000
+      },
+      "material": "C30"
+    }
+  ]
+}

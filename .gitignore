@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.zip
+*.tmp
+test_*.ifc
+test_*.json
+*.code-workspace
+.DS_Store
+ifcJSON/

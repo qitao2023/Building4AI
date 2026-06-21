@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 楼梯设计 — StructureAI</title>
+<style>
+:root { --bg: #0a0d14; --surface: #111620; --surface2: #191e2b; --border: #242b3a; --text: #e4e8f0; --text2: #8896b0; --text3: #556080; --blue: #3b82f6; --glow: rgba(59,130,246,0.2); --amber: #f59e0b; --green: #10b981; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; min-height: 100vh; }
+body::before { content: ''; position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse 80% 60% at 20% 10%, rgba(59,130,246,0.04) 0%, transparent 70%), radial-gradient(ellipse 60% 80% at 80% 60%, rgba(245,158,11,0.03) 0%, transparent 70%); }
+.app { max-width: 880px; margin: 0 auto; padding: 40px 20px 80px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 28px; }
+.card-glass { background: linear-gradient(135deg, rgba(17,22,32,0.95), rgba(25,30,43,0.9)); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; padding: 28px; }
+.upload-zone { border: 2px dashed var(--border); border-radius: 16px; padding: 48px 20px; text-align: center; cursor: pointer; transition: all 0.3s; }
+.upload-zone:hover { border-color: var(--blue); background: rgba(59,130,246,0.04); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: none; border-radius: 12px; cursor: pointer; font-weight: 600; font-size: 15px; font-family: inherit; transition: all 0.3s; }
+.btn-primary { background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; padding: 16px 40px; font-size: 17px; width: 100%; max-width: 400px; }
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 30px var(--glow); }
+.btn-primary:disabled { opacity: 0.4; cursor: wait; transform: none; }
+.btn-outline { background: transparent; color: var(--text2); border: 1px solid var(--border); padding: 10px 20px; font-size: 13px; border-radius: 10px; }
+.btn-outline:hover { border-color: var(--text2); color: var(--text); }
+.btn-green { background: var(--green); color: #fff; padding: 10px 24px; font-size: 14px; border-radius: 10px; }
+.btn-sm { padding: 6px 14px; font-size: 12px; border-radius: 8px; }
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+.pill-blue { background: var(--glow); color: #6aa8ff; }
+.pill-amber { background: rgba(245,158,11,0.15); color: #fcc44c; }
+.pill-green { background: rgba(16,185,129,0.12); color: #3dd68c; }
+.steps { display: flex; align-items: center; gap: 8px; margin-bottom: 36px; }
+.step-item { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text3); white-space: nowrap; }
+.step-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+.step-active { color: var(--text); font-weight: 600; } .step-active .step-dot { background: var(--blue); box-shadow: 0 0 10px var(--glow); }
+.step-done { color: var(--text2); } .step-done .step-dot { background: var(--green); }
+.step-line { flex: 1; height: 1px; background: var(--border); min-width: 16px; } .step-line.done { background: var(--green); }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 600px) { .grid-2 { grid-template-columns: 1fr; } .steps { flex-wrap: wrap; } }
+.item { background: var(--surface2); border-radius: 10px; padding: 14px 16px; }
+.item-label { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
+.item-val { font-size: 19px; font-weight: 600; font-family: 'SF Mono','Cascadia Code','Consolas',monospace; }
+.item-unit { font-size: 12px; color: var(--text3); font-weight: 400; }
+.sec-title { font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.logo { font-size: 20px; font-weight: 700; }
+input[type="text"], input[type="password"] { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; color: var(--text); font-size: 13px; width: 100%; outline: none; font-family: monospace; }
+input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+.api-row { display: flex; gap: 12px; align-items: end; }
+.api-row > div { flex: 1; min-width: 120px; }
+.api-label { font-size: 11px; color: var(--text3); margin-bottom: 5px; }
+.candidate-tag { display: inline-block; background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 20px; padding: 5px 12px; font-size: 11px; color: var(--text2); margin: 3px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { width: 22px; height: 22px; border: 2.5px solid rgba(255,255,255,0.2); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; }
+@keyframes up { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+.anim-in { animation: up 0.4s ease forwards; }
+.mb12 { margin-bottom: 12px; } .mb16 { margin-bottom: 16px; } .mb24 { margin-bottom: 24px; } .mb32 { margin-bottom: 32px; }
+.mt16 { margin-top: 16px; } .mt24 { margin-top: 24px; }
+</style>
+</head>
+<body>
+<div id="app" class="app"></div>
+<script>
+(function() {
+  var app = document.getElementById('app');
+  if (!app) { document.body.innerHTML = '<h1 style="color:red;padding:40px">FATAL: #app not found</h1>'; return; }
+
+  var S = { step:0, file:null, analysis:null, designing:false, result:null, key:'', model:'deepseek-chat' };
+  var API = 'http://localhost:8765';
+  var STEPS = ['上传模型','自动分析','AI 设计','导出结果'];
+
+  // ── helpers ──
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function tag(t, cls, html, attrs) {
+    var a = attrs ? ' '+attrs : '';
+    return '<'+t+' class="'+cls+'"'+a+'>'+html+'</'+t+'>';
+  }
+  function div(cls, html) { return tag('div', cls, html); }
+
+  // ── sections ──
+  function stepsHTML() {
+    var h = '<div class="steps">';
+    for (var i = 0; i < STEPS.length; i++) {
+      var cls = i < S.step ? 'step-done' : i === S.step ? 'step-active' : '';
+      h += '<div class="step-item '+cls+'"><div class="step-dot"></div><span>'+STEPS[i]+'</span></div>';
+      if (i < STEPS.length-1) h += '<div class="step-line'+(i<S.step?' done':'')+'"></div>';
+    }
+    return h + '</div>';
+  }
+
+  function uploadHTML() {
+    var h = '<div class="sec-title mb16">📂 第一步：导入模型 <button class="btn btn-outline btn-sm" onclick="window._skip()" style="font-size:11px;margin-left:8px">⚡ 快速体验</button></div>';
+    if (S.file) {
+      h += '<div class="card anim-in mb24"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px">';
+      h += '<div style="display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;border-radius:10px;background:var(--glow);display:flex;align-items:center;justify-content:center;font-size:18px">📄</div>';
+      h += '<div><div style="font-weight:600;font-size:14px">'+esc(S.file)+'</div><div style="font-size:11px;color:var(--text3)">IFC 结构模型 · 已就绪</div></div></div>';
+      h += '<button class="btn btn-outline btn-sm" onclick="window._reset()">更换文件</button></div></div>';
+    } else {
+      h += '<div class="upload-zone" id="zone" onclick="window._pick()"><div style="font-size:48px;margin-bottom:12px;opacity:0.5">🏗️</div>';
+      h += '<div style="font-size:17px;font-weight:600;margin-bottom:6px">拖入 IFC 文件或点击上传</div>';
+      h += '<div style="font-size:13px;color:var(--text3)">支持 Revit / Tekla 导出的结构 IFC</div></div>';
+    }
+    return h;
+  }
+
+  function analysisHTML() {
+    if (!S.analysis) return '';
+    var a = S.analysis;
+    var h = '<div class="card anim-in mb24">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><div class="sec-title" style="margin-bottom:0">📊 第二步：自动分析结果</div><span class="pill pill-green">✅ '+esc(a.summary)+'</span></div>';
+    h += '<div class="grid-3">';
+    var items = [
+      ['📏 层高',a.floorHeight,'mm'], ['🏛️ 梁顶标高',a.beamTop,'mm'],
+      ['📐 梁高',a.beamDepth,'mm'], ['↔️ 柱网 X',a.columnGridX,''],
+      ['↕️ 柱网 Y',a.columnGridY,''], ['🔍 潜在楼梯间',a.candidates.length,'个']
+    ];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      h += '<div class="item"><div class="item-label">'+it[0]+'</div><div class="item-val">'+esc(it[1])+'<span class="item-unit">'+it[2]+'</span></div></div>';
+    }
+    h += '</div><div class="sec-title mt16" style="margin-bottom:8px">🔍 自动识别楼梯间区域</div><div>';
+    for (var i = 0; i < a.candidates.length; i++) {
+      var c = a.candidates[i];
+      h += '<span class="candidate-tag">'+esc(c.name)+': '+c.l+'×'+c.w+'mm</span>';
+    }
+    return h + '</div></div>';
+  }
+
+  function aiConfigHTML() {
+    if (!S.analysis) return '';
+    return '<div class="card anim-in mb24"><div class="sec-title">⚙️ AI 引擎配置</div><div class="api-row">'+
+      '<div><div class="api-label">API Key</div><input type="password" id="key-inp" placeholder="sk-..." value="'+esc(S.key)+'"></div>'+
+      '<div><div class="api-label">模型</div><select id="model-inp" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-size:13px;width:100%;outline:none;font-family:monospace"><option value="deepseek-v4-pro"'+(S.model=="deepseek-v4-pro"?" selected":"")+'>deepseek-v4-pro (推理)</option><option value="deepseek-v4-flash"'+(S.model=="deepseek-v4-flash"?" selected":"")+'>deepseek-v4-flash (快速)</option><option value="deepseek-chat"'+(S.model=="deepseek-chat"?" selected":"")+'>deepseek-chat (标准)</option></select></div>'+
+      '<div style="display:flex;align-items:end;padding-bottom:2px"><span id="api-dot" class="pill '+(S.key?'pill-green':'pill-amber')+'">'+(S.key?'🟢 AI 已连接':'🟡 本地算法')+'</span></div>'+
+      '</div></div>';
+  }
+
+  function genButtonHTML() {
+    if (!S.analysis) return '';
+    var h = '<div style="text-align:center;margin:32px 0"><button class="btn btn-primary" onclick="window._design()"';
+    if (S.designing) h += ' disabled><span class="spinner"></span> AI 正在设计...</button>';
+    else h += '>🤖 AI 设计楼梯</button>';
+    h += '<div style="font-size:13px;color:var(--text3);margin-top:8px;text-align:center">'+(S.key?'使用 DeepSeek AI 云端推理':'使用本地算法')+'</div></div>';
+    return h;
+  }
+
+  function resultHTML() {
+    if (!S.result) return '';
+    var r = S.result;
+    var h = '<div class="card-glass anim-in mt24">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px">';
+    h += '<div><div style="font-size:17px;font-weight:700;margin-bottom:4px">📋 设计结果</div><span>设计来源：<span class="pill pill-amber">'+esc(r.source)+'</span></span></div>';
+    h += '<button class="btn btn-green" onclick="window._download()">⬇ 下载 IFC</button></div>';
+    h += '<div class="grid-2"><div><div class="sec-title">🏃 梯段</div>';
+    for (var i = 0; i < r.flights.length; i++) {
+      var f = r.flights[i];
+      h += '<div class="item mb16"><div style="font-weight:600;font-size:14px;margin-bottom:6px">'+esc(f.name)+'</div><div style="display:flex;gap:16px;font-size:13px;color:var(--text2);font-family:monospace"><span>'+f.n+' 级</span><span>↑'+f.riser+'mm</span><span>→'+f.tread+'mm</span></div></div>';
+    }
+    h += '</div><div><div class="sec-title">🪜 平台 & 栏杆</div>';
+    for (var i = 0; i < r.landings.length; i++) {
+      var l = r.landings[i];
+      h += '<div class="item mb16"><div style="font-weight:600;font-size:14px;margin-bottom:4px">'+esc(l.name)+'</div><div style="font-size:13px;color:var(--text2);font-family:monospace">'+l.l+'×'+l.w+'×'+l.t+'mm · 标高 '+l.el+'mm</div></div>';
+    }
+    h += '<div style="font-size:12px;color:var(--text3);margin-top:4px">栏杆: '+esc(r.railings)+'</div></div></div>';
+    h += '<div class="mt16"><span class="pill '+(r.errors>0?'pill-amber':'pill-green')+'">'+ (r.errors>0?'⚠️ 规范检查：'+r.errors+' 项问题':'✅ 规范检查全部通过') +'</span></div>';
+  if (r.debug) { h += '<div class="mt16 item" style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2)"><div class="item-label">🔧 AI 返回调试信息</div><div style="font-size:12px;color:var(--text2);word-break:break-all;font-family:monospace">'+esc(r.debug)+'</div></div>'; }
+  h += '</div>';
+    return h;
+  }
+
+  // ── render ──
+  function render() {
+    var h = '';
+    // Header
+    h += '<div style="margin-bottom:36px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="logo" style="color:var(--text)">StructureAI</div><span class="pill pill-blue">v0.3 beta</span></div>';
+    h += '<h1 style="font-size:34px;font-weight:700;letter-spacing:-1px;margin-bottom:8px">AI 楼梯设计</h1>';
+    h += '<p style="font-size:15px;color:var(--text2);line-height:1.6;max-width:560px">导入结构 IFC 模型，自动识别楼梯间参数，AI 生成合规的双跑楼梯方案</p></div>';
+    // Steps
+    h += stepsHTML();
+    // Upload
+    h += '<div class="mb24">'+uploadHTML()+'</div>';
+    // Analysis
+    h += analysisHTML();
+    // AI Config
+    h += aiConfigHTML();
+    // Generate button
+    h += genButtonHTML();
+    // Result
+    h += resultHTML();
+    // Footer
+    h += '<footer style="text-align:center;margin-top:80px;padding-top:32px;border-top:1px solid var(--border)"><div style="font-size:13px;color:var(--text3)">StructureAI · AI 结构设计助手 · GB 50010-2010</div></footer>';
+
+    app.innerHTML = h;
+    bindEvents();
+  }
+
+  function bindEvents() {
+    var zone = document.getElementById('zone');
+    if (zone) {
+      zone.ondragover = function(e) { e.preventDefault(); zone.style.borderColor='var(--blue)'; zone.style.background='rgba(59,130,246,0.05)'; };
+      zone.ondragleave = function() { zone.style.borderColor=''; zone.style.background=''; };
+      zone.ondrop = function(e) { e.preventDefault(); zone.style.borderColor=''; zone.style.background=''; var f = e.dataTransfer.files[0]; if (f && f.name && f.name.endsWith('.ifc')) window._load(f.name); };
+    }
+    var ki = document.getElementById('key-inp');
+    if (ki) ki.oninput = function() { S.key = this.value; updateDot(); };
+    var mi = document.getElementById('model-inp');
+    if (mi) mi.onchange = function() { S.model = this.value; };
+  }
+
+  function updateDot() {
+    var d = document.getElementById('api-dot');
+    if (d) { d.className = 'pill '+(S.key?'pill-green':'pill-amber'); d.innerHTML = S.key?'🟢 AI 已连接':'🟡 本地算法'; }
+  }
+
+  // ── actions ──
+  var _fileObj = null;
+  window._pick = function() { var inp = document.createElement('input'); inp.type='file'; inp.accept='.ifc'; inp.onchange=function(){var f=inp.files[0];if(f){_fileObj=f;window._load(f);}}; inp.click(); };
+  window._load = function(f) {
+    S.file = f.name || 'unknown.ifc'; S.result = null; S.step = 1; S.analysis = null; render();
+    // Upload to API for real analysis
+    var fd = new FormData();
+    fd.append('file', f);
+    fetch(API+'/api/analyze', { method:'POST', body:fd })
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (data.error) { alert(data.error); return; }
+        S.analysis = data; S.step = 2; render();
+      })
+      .catch(function(e){ alert('API 连接失败: '+e.message+' — 请确认服务器已启动 (python server.py)'); });
+  };
+  window._skip = function() { S.file = 'demo_project.ifc'; S.result = null; S.step = 1; S.analysis = null; render(); setTimeout(function(){ S.analysis = { floorHeight:4500, beamTop:4450, beamDepth:400, columnGridX:'0 / 8400 / 16800', columnGridY:'0 / 8400 / 16800', candidates:[{name:'区间 X0-8400 Y0-8400',l:8400,w:8400},{name:'区间 X8400-16800 Y8400-16800',l:8400,w:8400}], summary:'演示模式 (跳过上传)' }; S.step = 2; render(); }, 300); };
+  window._reset = function() { S.file = null; S.analysis = null; S.result = null; S.step = 0; render(); };
+  window._design = function() {
+    S.designing = true; S.step = 3; S.result = null; render();
+    var cand = S.analysis.candidates && S.analysis.candidates[0];
+    var payload = {
+      stairwell: { length_mm: cand ? cand.l : 6000, width_mm: cand ? cand.w : 2700, floor_height_mm: S.analysis.floorHeight||4500, beam_top: S.analysis.beamTop||4400, beam_depth: S.analysis.beamDepth||400 },
+      api_key: S.key, model: S.model
+    };
+    fetch(API+'/api/design', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        var d = data.design;
+        S.result = {
+          source: data.source,
+          flights: d.flights,
+          landings: d.landings,
+          railings: d.railings || '',
+          errors: (data.errors||[]).length
+        };
+        if (data.debug) { S.result.debug = data.debug; }
+        if (data.errors && data.errors.length > 0) { S.result.errors = data.errors.length; }
+        else { S.result.errors = 0; }
+        S.designing = false; S.step = 4; render();
+      })
+      .catch(function(e){ alert('网络错误: '+e.message); S.designing = false; render(); });
+  };
+  window._download = function() {
+    if (!S.result) return;
+    var cand = S.analysis && S.analysis.candidates && S.analysis.candidates[0];
+    var payload = {
+      flights: S.result.flights, landings: S.result.landings,
+      railings: S.result.railings,
+      stairwell_length_mm: cand ? cand.l : 6000,
+      stairwell_width_mm: cand ? cand.w : 2700,
+      width_mm: S.result.flights && S.result.flights[0] ? 1200 : 1200,
+      stairwell: { floor_height_mm: S.analysis ? S.analysis.floorHeight : 4500 }
+    };
+    fetch(API+'/api/generate-ifc', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
+      .then(function(r){ return r.blob(); })
+      .then(function(blob){ var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='stair_design.ifc'; a.click(); })
+      .catch(function(e){ alert('下载失败: '+e.message); });
+  };
+
+  // ── go ──
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,410 @@
+"""
+StructureAI Backend — Zero-dependency HTTP server
+Upload IFC → Analyze → AI Design → Download IFC with stair + original structure
+"""
+import json, urllib.request, urllib.error, tempfile, shutil, re
+from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
+from http.client import HTTPSConnection
+
+import ifcopenshell
+from ifcopenshell.api import run
+
+PORT = 8765
+LAST_IFC = None  # stored uploaded IFC path
+
+# ═══════════════════════════════════ IFC Analysis ══
+def extract_ifc_context(fp):
+    m = ifcopenshell.open(fp)
+    ctx = {"storeys":[],"beams":[],"columns":[],"slabs":[],"walls":[],"floor_heights":{},"column_positions":[],"beam_elevations":set()}
+    for s in m.by_type("IfcBuildingStorey"):
+        e = getattr(s,"Elevation",None); eh = e.wrappedValue if hasattr(e,'wrappedValue') else (float(e) if e else 0)
+        ctx["storeys"].append({"global_id":s.GlobalId,"name":s.Name or "?","elevation":eh})
+    for b in m.by_type("IfcBeam"):
+        info = ent_info(b); ctx["beams"].append(info)
+        if info["pos"][2]: ctx["beam_elevations"].add(round(info["pos"][2]/100)*100)
+    for c in m.by_type("IfcColumn"):
+        info = ent_info(c); ctx["columns"].append(info); ctx["column_positions"].append(info["pos"])
+    for s in m.by_type("IfcSlab"): ctx["slabs"].append(ent_info(s))
+    for w in m.by_type("IfcWall"): ctx["walls"].append(ent_info(w))
+    ss = sorted(ctx["storeys"], key=lambda s:s["elevation"])
+    for i,s in enumerate(ss):
+        ctx["floor_heights"][s["name"]] = round(ss[i+1]["elevation"]-s["elevation"]) if i+1<len(ss) else 4500
+    cx=sorted(set(round(c["pos"][0]/100)*100 for c in ctx["columns"] if c["pos"][0]))
+    cy=sorted(set(round(c["pos"][1]/100)*100 for c in ctx["columns"] if c["pos"][1]))
+    ctx["col_x"]=cx; ctx["col_y"]=cy
+    ctx["beam_elevations"]=sorted(ctx["beam_elevations"])
+    ctx["candidates"]=detect_candidates(ctx)
+    return ctx
+
+def ent_info(e):
+    info={"global_id":e.GlobalId,"name":e.Name or "","type":e.is_a(),"pos":(0,0,0),"size":(200,200,3000)}
+    for rel in getattr(e,"IsDefinedBy",[]) or []:
+        if not rel.is_a("IfcRelDefinesByProperties"): continue
+        ps=rel.RelatingPropertyDefinition
+        if not ps: continue
+        props={}
+        for p in getattr(ps,"HasProperties",[]) or []:
+            if hasattr(p,"NominalValue") and p.NominalValue:
+                props[p.Name]=p.NominalValue.wrappedValue if hasattr(p.NominalValue,'wrappedValue') else p.NominalValue
+        w=props.get("Width") or props.get("width") or 200
+        d=props.get("Depth") or props.get("depth") or 200
+        l=props.get("Length") or props.get("length") or 3000
+        info["size"]=(float(w),float(d),float(l))
+    op=getattr(e,"ObjectPlacement",None)
+    if op and hasattr(op,"RelativePlacement") and hasattr(op.RelativePlacement,"Location"):
+        lc=op.RelativePlacement.Location; cs=lc.Coordinates if hasattr(lc,'Coordinates') else lc
+        try: info["pos"]=(float(cs[0]),float(cs[1]),float(cs[2]))
+        except: pass
+    return info
+
+def detect_candidates(ctx):
+    gx,gy=ctx["col_x"],ctx["col_y"]; cands=[]
+    if len(gx)<2 or len(gy)<2:
+        ax=[c["pos"][0] for c in ctx["columns"] if c["pos"][0]]
+        ay=[c["pos"][1] for c in ctx["columns"] if c["pos"][1]]
+        if ax and ay: cands.append({"name":"全区域","length_mm":round(max(ax)-min(ax)),"width_mm":round(max(ay)-min(ay))})
+        return cands
+    for i in range(len(gx)-1):
+        if gx[i+1]-gx[i]>2000:
+            for j in range(len(gy)-1):
+                if gy[j+1]-gy[j]>2000:
+                    cands.append({"name":f"X{gx[i]}-{gx[i+1]} Y{gy[j]}-{gy[j+1]}","length_mm":gx[i+1]-gx[i],"width_mm":gy[j+1]-gy[j]})
+    if not cands: cands.append({"name":"全区域","length_mm":max(gx)-min(gx),"width_mm":max(gy)-min(gy)})
+    return cands
+
+# ═══════════════════════════════════ AI ══
+PROMPT = """Design a double-run stair per GB 50010. Output ONLY valid JSON.
+Stairwell: {sw}
+Rules: riser≤175, tread≥260, landing≥1200, width≥1100, headroom≥2200, railing=900.
+JSON: {{"type":"double_run","width_mm":N,"flights":[{{"id":"F1","name":"第一跑","tread_count":N,"riser_height_mm":N,"tread_depth_mm":N,"start_at_bottom":true,"length_mm":N,"height_mm":N}},{{"id":"F2","name":"第二跑","tread_count":N,"riser_height_mm":N,"tread_depth_mm":N,"start_at_bottom":false,"length_mm":N,"height_mm":N}}],"landings":[{{"id":"L1","name":"中间平台","length_mm":N,"width_mm":N,"thickness_mm":150,"elevation_mm":N}},{{"id":"L2","name":"楼层平台","length_mm":N,"width_mm":N,"thickness_mm":150,"elevation_mm":N}}],"railings":[{{"id":"R1","name":"左侧栏杆","height_mm":900}},{{"id":"R2","name":"右侧栏杆","height_mm":900}}]}}"""
+
+def call_ai(sw, key, model, endpoint):
+    p = PROMPT.format(sw=json.dumps(sw, indent=2, ensure_ascii=False))
+    payload = json.dumps({"model":model,"messages":[{"role":"system","content":"Output only valid JSON, no markdown."},{"role":"user","content":p}],"temperature":0.3,"max_tokens":4096}, ensure_ascii=False).encode('utf-8')
+    try:
+        u = urlparse(endpoint)
+        conn = HTTPSConnection(u.hostname, u.port or 443, timeout=120)
+        conn.request("POST","/v1/chat/completions",body=payload,
+            headers={"Content-Type":"application/json; charset=utf-8","Authorization":("Bearer "+key).encode('ascii','ignore').decode('ascii')})
+        r = conn.getresponse(); raw = r.read(); conn.close()
+        if r.status != 200: return {"ok":False,"err":f"HTTP {r.status}: {raw.decode('utf-8','replace')[:300]}"}
+        data = json.loads(raw)
+        msg = data.get("choices",[{}])[0].get("message",{})
+        content = msg.get("content","")
+        if not content and msg.get("reasoning_content"):
+            rc = msg["reasoning_content"]; s = rc.rfind('{'); e = rc.rfind('}')
+            if s>=0 and e>s: content = rc[s:e+1]
+        if not content: return {"ok":False,"err":"Empty response","debug":json.dumps(data,ensure_ascii=False)[:500]}
+        content = content.strip()
+        # Extract JSON
+        depth = 0; start = content.find('{')
+        if start < 0: return {"ok":False,"err":"No JSON found","debug":content[:500]}
+        for i in range(start, len(content)):
+            if content[i]=='{': depth+=1
+            elif content[i]=='}': depth-=1
+            if depth==0: content=content[start:i+1]; break
+        design = json.loads(content)
+        # Normalize
+        for f in design.get("flights",[]):
+            f.setdefault("tread_depth_mm",280); f.setdefault("riser_height_mm",150)
+            f.setdefault("length_mm",f.get("tread_count",10)*f.get("tread_depth_mm",280))
+            f.setdefault("height_mm",f.get("tread_count",10)*f.get("riser_height_mm",150))
+            f.setdefault("start_at_bottom",f.get("id")=="F1")
+        for ld in design.get("landings",[]): ld.setdefault("thickness_mm",150); ld.setdefault("width_mm",sw.get("width_mm",2700))
+        design.setdefault("type","double_run"); design.setdefault("width_mm",sw.get("width_mm",1200)-300)
+        return {"ok":True,"design":design,"source":f"DeepSeek AI ({model})","raw":content[:2000]}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"ok":False,"err":str(e)}
+
+def algo_design(sw):
+    L,W,H=sw["length_mm"],sw["width_mm"],sw["floor_height_mm"]
+    tr=round(H/150); rh=H/tr; rpf=tr//2; td=280; sw2=min(W-300,1200); sw2=max(sw2,1100); fl=rpf*td; ll=max(round((L-fl)/2),1200)
+    return {"type":"double_run","width_mm":sw2,"flights":[{"id":"F1","name":"第一跑","tread_count":rpf,"riser_height_mm":round(rh),"tread_depth_mm":td,"start_at_bottom":True,"length_mm":fl,"height_mm":round(rh*rpf)},{"id":"F2","name":"第二跑","tread_count":tr-rpf,"riser_height_mm":round(rh),"tread_depth_mm":td,"start_at_bottom":False,"length_mm":(tr-rpf)*td,"height_mm":round(rh*(tr-rpf))}],"landings":[{"id":"L1","name":"中间平台","length_mm":ll,"width_mm":W,"thickness_mm":150,"elevation_mm":round(rh*rpf)},{"id":"L2","name":"楼层平台","length_mm":ll,"width_mm":W,"thickness_mm":150,"elevation_mm":H}],"railings":[{"id":"R1","name":"左侧栏杆","height_mm":900},{"id":"R2","name":"右侧栏杆","height_mm":900}]}
+
+def check_rules(d, sw):
+    errs=[]
+    if d.get("width_mm",0)<1100: errs.append({"rule":"width","msg":f"宽度<1100"})
+    for f in d.get("flights",[]):
+        if f.get("riser_height_mm",0)>175: errs.append({"rule":"riser","loc":f.get("id"),"msg":"踏步高>175"})
+        if f.get("tread_depth_mm",0)<260: errs.append({"rule":"tread","loc":f.get("id"),"msg":"踏步深<260"})
+    for ld in d.get("landings",[]):
+        if ld.get("length_mm",0)<1200: errs.append({"rule":"landing","loc":ld.get("id"),"msg":"平台深<1200"})
+    bb=sw.get("beam_position_top_mm",sw["floor_height_mm"])-sw.get("beam_depth_mm",400)
+    for ld in d.get("landings",[]):
+        if "楼层" in ld.get("name",""): continue
+        hr=bb-ld.get("elevation_mm",0)
+        if hr<2200: errs.append({"rule":"headroom","loc":ld.get("id"),"msg":f"净高{hr}<2200"})
+    return errs
+
+# ═══════════════════════════════════ IFC Generation ══
+def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw_mm, well_w_mm=2700):
+    """Load base IFC, add stair entities with 3D geometry, return temp path."""
+    model = ifcopenshell.open(base_ifc_path)
+
+    # Find existing storey
+    storeys = model.by_type("IfcBuildingStorey")
+    sty = storeys[0] if storeys else run("root.create_entity", model, ifc_class="IfcBuildingStorey", name="F1")
+
+    stair = run("root.create_entity", model, ifc_class="IfcStair", name="AI楼梯")
+    run("spatial.assign_container", model, products=[stair], relating_structure=sty)
+
+    # Geometric context
+    proj = model.by_type("IfcProject")[0]
+    if not getattr(proj, "RepresentationContexts", None):
+        gctx = model.create_entity('IfcGeometricRepresentationContext', ContextType='Model',
+            CoordinateSpaceDimension=3, Precision=0.001,
+            WorldCoordinateSystem=model.create_entity('IfcAxis2Placement3D',
+                Location=model.create_entity('IfcCartesianPoint', Coordinates=[0.,0.,0.]),
+                Axis=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]),
+                RefDirection=model.create_entity('IfcDirection', DirectionRatios=[1.,0.,0.])))
+        proj.RepresentationContexts = [gctx]
+    else:
+        gctx = proj.RepresentationContexts[0]
+    gsub = model.create_entity('IfcGeometricRepresentationSubContext',
+        ContextType='Body', ContextIdentifier='Body', ParentContext=gctx)
+
+    def mk_place(e, x, y, z):
+        e.ObjectPlacement = model.create_entity('IfcLocalPlacement',
+            RelativePlacement=model.create_entity('IfcAxis2Placement3D',
+                Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(x),float(y),float(z)]),
+                Axis=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]),
+                RefDirection=model.create_entity('IfcDirection', DirectionRatios=[1.,0.,0.])))
+
+    def add_geom(e, w, d, l, ox=0, oy=0, oz=0):
+        r = model.create_entity('IfcRectangleProfileDef', ProfileType='AREA', XDim=float(w), YDim=float(d))
+        s = model.create_entity('IfcExtrudedAreaSolid', SweptArea=r,
+            Position=model.create_entity('IfcAxis2Placement3D', Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(ox),float(oy),float(oz)])),
+            ExtrudedDirection=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]), Depth=float(l))
+        e.Representation = model.create_entity('IfcProductDefinitionShape',
+            Representations=[model.create_entity('IfcShapeRepresentation', ContextOfItems=gsub,
+                RepresentationIdentifier='Body', RepresentationType='SweptSolid', Items=[s])])
+
+    f1 = flights_data[0] if flights_data else {}
+    f2 = flights_data[1] if len(flights_data) > 1 else {}
+    fl1 = f1.get("len", 4200); fh1 = f1.get("h", 2250)
+    ll_val = landings_data[0].get("l", 1200) if landings_data else 1200
+    mid_el = fh1; H = stairwell.get("floor_height_mm", 4500)
+    # Center stair in stairwell interior (account for 500mm columns)
+    col_half = 250  # half column width
+    x0 = col_half  # start after left column
+    y0 = (well_w_mm - sw_mm) // 2
+    sy2 = y0 - sw_mm//2  # left edge of stair
+
+    # Landings
+    for ld in landings_data:
+        slab = run("root.create_entity", model, ifc_class="IfcSlab", name=ld.get("name","Landing"))
+        run("aggregate.assign_object", model, products=[slab], relating_object=stair)
+        run("spatial.assign_container", model, products=[slab], relating_structure=sty)
+        ll=ld.get("l",1200); lw=ld.get("w",2700); lt=ld.get("t",150); el=ld.get("el",0)
+        x_off = x0 if "楼层" in ld.get("name","") else x0 + fl1
+        mk_place(slab, x_off, y0 - lw//2, el)
+        add_geom(slab, ll, lw, lt)
+
+    # Flight 1 steps
+    if flights_data:
+        f = flights_data[0]; n=f.get("n",10); td=f.get("tread",280); rh=f.get("riser",150)
+        for s in range(n):
+            step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F1')}_s{s+1}")
+            run("aggregate.assign_object", model, products=[step], relating_object=stair)
+            mk_place(step, x0 + s*td, sy2, s*rh)
+            add_geom(step, td, sw_mm, rh)
+
+    # Flight 2 steps
+    if len(flights_data) > 1:
+        f = flights_data[1]; n=f.get("n",10); td=f.get("tread",280); rh=f.get("riser",150)
+        sx = fl1 + ll_val
+        for s in range(n):
+            step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F2')}_s{s+1}")
+            run("aggregate.assign_object", model, products=[step], relating_object=stair)
+            mk_place(step, x0 + sx-(s+1)*td, sy2, mid_el+s*rh)
+            add_geom(step, td, sw_mm, rh)
+
+    # Railings
+    for fi, f in enumerate(flights_data):
+        n=f.get("n",10); td=f.get("tread",280); rh_s=f.get("riser",150)
+        if fi==0: sx,sz,xdir = x0,0,1
+        else: sx,sz,xdir = x0+fl1+ll_val,mid_el,-1
+        for side, sy in [("L",sy2+50),("R",sy2+sw_mm-50)]:
+            for si in range(0,n+1,3):
+                px=sx+xdir*min(si,n-1)*td+xdir*td//2; pz=sz+min(si,n-1)*rh_s
+                post=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Post_{fi}_{side}_{si}")
+                run("aggregate.assign_object",model,products=[post],relating_object=stair)
+                mk_place(post,px-20,sy-20,pz); add_geom(post,40,40,900)
+            fp=sx+xdir*td//2; lp=sx+xdir*(n-1)*td+xdir*td//2
+            rail=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Rail_{fi}_{side}")
+            run("aggregate.assign_object",model,products=[rail],relating_object=stair)
+            mk_place(rail,min(fp,lp),sy-20,sz+(n//2)*rh_s+900)
+            add_geom(rail,abs(lp-fp)+40,40,40)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".ifc", delete=False)
+    model.write(tmp.name); tmp.close()
+    return tmp.name
+
+# ═══════════════════════════════════ HTTP ══
+class Handler(BaseHTTPRequestHandler):
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin","*")
+        self.send_header("Access-Control-Allow-Methods","GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers","*")
+    def _json(self, data, code=200):
+        self.send_response(code); self._cors(); self.send_header("Content-Type","application/json; charset=utf-8"); self.end_headers()
+        self.wfile.write(json.dumps(data,ensure_ascii=False).encode())
+    def _file(self, path, code=200):
+        self.send_response(code); self._cors(); self.send_header("Content-Type","application/octet-stream")
+        self.send_header("Content-Disposition","attachment; filename=stair_design.ifc"); self.end_headers()
+        with open(path,"rb") as f: self.wfile.write(f.read())
+    def do_OPTIONS(self): self.send_response(200); self._cors(); self.end_headers()
+    def do_GET(self):
+        if self.path=="/api/health": return self._json({"status":"ok","version":"0.5"})
+        if self.path=="/api/geometry": return self._geometry()
+        self._json({"error":"not found"},404)
+
+    def do_POST(self):
+        if self.path=="/api/analyze": return self._analyze()
+        if self.path=="/api/design": return self._design()
+        if self.path=="/api/generate-ifc": return self._gen_ifc()
+        self._json({"error":"not found"},404)
+
+    def _geometry(self):
+        global LAST_IFC
+        if not LAST_IFC or not Path(LAST_IFC).exists():
+            return self._json({"error":"No IFC uploaded yet"}, 400)
+        try:
+            m = ifcopenshell.open(LAST_IFC)
+            elements = []
+            for e in m:
+                t = e.is_a()
+                if t not in ('IfcColumn','IfcBeam','IfcSlab','IfcWall','IfcStair','IfcStairFlight','IfcRailing'):
+                    continue
+                info = {"global_id":e.GlobalId,"name":e.Name or "","type":t,"pos":[0,0,0],"size":[200,200,3000]}
+                # Get placement
+                op = getattr(e, "ObjectPlacement", None)
+                if op and hasattr(op,"RelativePlacement") and hasattr(op.RelativePlacement,"Location"):
+                    lc = op.RelativePlacement.Location
+                    cs = lc.Coordinates if hasattr(lc,'Coordinates') else lc
+                    try: info["pos"] = [float(cs[0]),float(cs[1]),float(cs[2])]
+                    except: pass
+                # Get geometry size from extrusion
+                rep = getattr(e, "Representation", None)
+                if rep:
+                    for r in getattr(rep, "Representations", []) or []:
+                        for item in getattr(r, "Items", []) or []:
+                            if item.is_a('IfcExtrudedAreaSolid'):
+                                area = item.SweptArea
+                                if hasattr(area,'XDim') and hasattr(area,'YDim'):
+                                    info["size"] = [float(area.XDim), float(area.YDim), float(item.Depth)]
+                # Get size from property sets if no extrusion found
+                if info["size"] == [200,200,3000]:
+                    for rel in getattr(e,"IsDefinedBy",[]) or []:
+                        if not rel.is_a("IfcRelDefinesByProperties"): continue
+                        ps = rel.RelatingPropertyDefinition
+                        if not ps: continue
+                        props = {}
+                        for p in getattr(ps,"HasProperties",[]) or []:
+                            if hasattr(p,"NominalValue") and p.NominalValue:
+                                props[p.Name] = p.NominalValue.wrappedValue if hasattr(p.NominalValue,'wrappedValue') else p.NominalValue
+                        w = props.get("Width") or props.get("width") or 200
+                        d = props.get("Depth") or props.get("depth") or 200
+                        l = props.get("Length") or props.get("length") or 3000
+                        info["size"] = [float(w),float(d),float(l)]
+                elements.append(info)
+
+            ctx = extract_ifc_context(LAST_IFC)
+            s = ctx["storeys"][0] if ctx["storeys"] else {"name":"F1"}
+            fh = ctx["floor_heights"].get(s["name"], 4500)
+            return self._json({"elements":elements,"floorHeight":fh,
+                "summary":f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])}"})
+        except Exception as e:
+            return self._json({"error":str(e)},500)
+
+    def _parse_multipart(self):
+        ct = self.headers.get("Content-Type","")
+        cl = int(self.headers.get("Content-Length",0))
+        body = self.rfile.read(cl)
+        boundary = ct.split("boundary=")[1].strip()
+        if boundary.startswith('"'): boundary = boundary[1:-1]
+        filename = "uploaded.ifc"; data = b""
+        for part in body.split(("--"+boundary).encode()):
+            if b'Content-Disposition' not in part: continue
+            hdr_end = part.find(b'\r\n\r\n')
+            if hdr_end < 0: continue
+            hdrs = part[:hdr_end].decode('latin-1')
+            m = re.search(r'filename="([^"]*)"', hdrs)
+            if m: filename = m.group(1)
+            if 'name="file"' in hdrs:
+                data = part[hdr_end+4:]
+                if data.endswith(b'\r\n'): data = data[:-2]
+                break
+        return filename, data
+
+    def _analyze(self):
+        global LAST_IFC
+        filename, data = self._parse_multipart()
+        if not data: return self._json({"error":"empty file"},400)
+        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
+            tmp.write(data); tp = tmp.name
+        if LAST_IFC and Path(LAST_IFC).exists(): Path(LAST_IFC).unlink(missing_ok=True)
+        LAST_IFC = tp
+        try:
+            ctx = extract_ifc_context(tp)
+            s = ctx["storeys"][0] if ctx["storeys"] else {"name":"F1","elevation":0}
+            fh = ctx["floor_heights"].get(s["name"],4500)
+            bt = ctx["beam_elevations"][-1] if ctx["beam_elevations"] else fh
+            return self._json({
+                "file":filename,
+                "summary":f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])} 墙:{len(ctx['walls'])}",
+                "floorHeight":fh,"beamTop":bt,"beamDepth":400,
+                "columnGridX":" / ".join(str(x) for x in ctx["col_x"]) if ctx["col_x"] else "未检测",
+                "columnGridY":" / ".join(str(y) for y in ctx["col_y"]) if ctx["col_y"] else "未检测",
+                "candidates":[{"name":c["name"],"l":c["length_mm"],"w":c["width_mm"]} for c in ctx["candidates"]]
+            })
+        except Exception as e:
+            Path(tp).unlink(missing_ok=True); LAST_IFC = None
+            return self._json({"error":str(e)},500)
+
+    def _design(self):
+        cl = int(self.headers.get("Content-Length",0))
+        body = json.loads(self.rfile.read(cl))
+        props = body.get("stairwell",{})
+        sw = {"length_mm":props.get("length_mm",6000),"width_mm":props.get("width_mm",2700),
+              "floor_height_mm":props.get("floor_height_mm",4500),
+              "beam_position_top_mm":props.get("beam_top",4400),"beam_depth_mm":props.get("beam_depth",400)}
+        key = body.get("api_key",""); model = body.get("model","deepseek-chat")
+        ep = body.get("endpoint","https://api.deepseek.com")
+        d = algo_design(sw); src = "📐 本地算法"; debug = ""
+        if key:
+            r = call_ai(sw, key, model, ep)
+            if r["ok"]: d = r["design"]; src = r["source"]
+            else: src=f"⚠️ AI失败: {r['err']}"; debug=r.get("debug","") or r.get("err","")
+        errs = check_rules(d, sw)
+        flights=[{"name":f["name"],"n":f["tread_count"],"riser":f["riser_height_mm"],"tread":f["tread_depth_mm"],"len":f["length_mm"],"h":f["height_mm"]} for f in d["flights"]]
+        landings=[{"name":l["name"],"l":l["length_mm"],"w":l["width_mm"],"t":l["thickness_mm"],"el":l["elevation_mm"]} for l in d["landings"]]
+        railings=", ".join(f"{r['name']}({r['height_mm']}mm)" for r in d["railings"])
+        result={"source":src,"design":{"flights":flights,"landings":landings,"railings":railings},"errors":errs}
+        if debug: result["debug"]=debug[:800]
+        return self._json(result)
+
+    def _gen_ifc(self):
+        global LAST_IFC
+        if not LAST_IFC or not Path(LAST_IFC).exists():
+            return self._json({"error":"请先上传IFC文件"},400)
+        cl = int(self.headers.get("Content-Length",0))
+        body = json.loads(self.rfile.read(cl))
+        flights = body.get("flights",[]); landings = body.get("landings",[])
+        sw = body.get("stairwell",{})
+        sw_mm = body.get("width_mm",1200)
+        try:
+            well_w = body.get("stairwell_width_mm", 2700)
+            tp = generate_stair_ifc(LAST_IFC, flights, landings, sw, sw_mm, well_w)
+            self._file(tp)
+            Path(tp).unlink(missing_ok=True)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self._json({"error":str(e)},500)
+
+if __name__ == "__main__":
+    print(f"StructureAI v0.4 → http://localhost:{PORT}")
+    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

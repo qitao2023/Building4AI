@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StructureAI — 3D Viewer</title>
+<style>
+:root { --bg:#0a0d14; --surface:#111620; --border:#242b3a; --text:#e4e8f0; --text2:#8896b0; --blue:#3b82f6; --amber:#f59e0b; --green:#10b981; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif; height:100vh; overflow:hidden; display:flex; }
+#sidebar { width:360px; min-width:360px; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; overflow-y:auto; padding:20px; }
+#viewer { flex:1; position:relative; }
+#canvas { width:100%; height:100%; display:block; }
+h2 { font-size:18px; font-weight:700; margin-bottom:4px; }
+.sub { font-size:13px; color:var(--text2); margin-bottom:20px; }
+.btn { display:inline-flex; align-items:center; gap:6px; border:none; border-radius:10px; cursor:pointer; font-weight:600; font-size:14px; font-family:inherit; transition:all .2s; padding:10px 20px; }
+.btn-primary { background:linear-gradient(135deg,#3b82f6,#2563eb); color:#fff; width:100%; justify-content:center; }
+.btn-primary:hover { box-shadow:0 4px 20px rgba(59,130,246,0.3); }
+.btn-primary:disabled { opacity:0.4; cursor:not-allowed; }
+.btn-outline { background:transparent; color:var(--text2); border:1px solid var(--border); }
+.btn-outline:hover { border-color:var(--text2); color:var(--text); }
+.btn-sm { padding:6px 12px; font-size:12px; }
+.pill { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:14px; font-size:11px; font-weight:500; }
+.pill-blue { background:rgba(59,130,246,0.15); color:#6aa8ff; }
+.pill-amber { background:rgba(245,158,11,0.15); color:#fcc44c; }
+.pill-green { background:rgba(16,185,129,0.12); color:#3dd68c; }
+.param-row { display:flex; gap:8px; margin-bottom:8px; }
+.param-row > div { flex:1; }
+.param-label { font-size:10px; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:3px; }
+.param-value { font-size:13px; font-weight:600; font-family:monospace; }
+input[type="text"],input[type="password"],select { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px 12px; color:var(--text); font-size:13px; width:100%; outline:none; font-family:monospace; }
+input:focus,select:focus { border-color:var(--blue); }
+.section { margin-bottom:20px; }
+.section-title { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+.hint { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.8); color:#fff; padding:8px 18px; border-radius:20px; font-size:13px; pointer-events:none; z-index:10; }
+#status { font-size:12px; color:var(--amber); margin-top:8px; text-align:center; min-height:18px; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>StructureAI</h2>
+  <div class="sub">上传 IFC → 三维查看 → 框选楼梯间 → AI 设计</div>
+
+  <div class="section">
+    <div class="section-title">📂 模型</div>
+    <button class="btn btn-outline btn-sm" onclick="document.getElementById('fu').click()" style="width:100%">选择 IFC 文件...</button>
+    <input type="file" id="fu" accept=".ifc" style="display:none">
+    <div id="file-info" style="font-size:12px;color:var(--text2);margin-top:6px"></div>
+  </div>
+
+  <div class="section" id="select-section" style="display:none">
+    <div class="section-title">📐 框选楼梯间</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px">
+      在三维视图中：<br>① 点 <b>第一个角</b> → ② 点 <b>对角</b>
+    </div>
+    <button class="btn btn-outline btn-sm" id="btn-select" onclick="startSelect()" style="width:100%">🖱 开始框选</button>
+    <div id="select-info" style="font-size:12px;color:var(--text2);margin-top:6px"></div>
+  </div>
+
+  <div class="section" id="stairwell-section" style="display:none">
+    <div class="section-title">📏 楼梯间参数</div>
+    <div class="param-row">
+      <div><div class="param-label">长度 (mm)</div><div class="param-value" id="v-length">—</div></div>
+      <div><div class="param-label">宽度 (mm)</div><div class="param-value" id="v-width">—</div></div>
+      <div><div class="param-label">层高 (mm)</div><div class="param-value" id="v-height">—</div></div>
+    </div>
+  </div>
+
+  <div class="section" id="ai-section" style="display:none">
+    <div class="section-title">⚙️ AI 引擎</div>
+    <div class="param-row">
+      <div><div class="param-label">模型</div>
+        <select id="model-sel">
+          <option value="deepseek-chat">deepseek-chat (标准)</option>
+          <option value="deepseek-v4-pro">deepseek-v4-pro (推理)</option>
+          <option value="deepseek-v4-flash">deepseek-v4-flash (快速)</option>
+        </select>
+      </div>
+      <div><div class="param-label">API Key</div><input type="password" id="key-inp" value="" placeholder="sk-..."></div>
+    </div>
+    <button class="btn btn-primary" id="btn-design" onclick="doDesign()" disabled>🤖 AI 设计楼梯</button>
+    <div id="status"></div>
+    <div id="design-result" style="margin-top:12px;font-size:12px"></div>
+    <button class="btn btn-outline btn-sm" id="btn-download" onclick="doDownload()" style="display:none;width:100%;margin-top:8px">⬇ 下载 IFC</button>
+  </div>
+</div>
+
+<div id="viewer">
+  <canvas id="canvas"></canvas>
+  <div class="hint" id="hint">🖱 拖拽旋转 · 滚轮缩放 · 右键平移</div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Scene Setup ──
+const viewer = document.getElementById('viewer');
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0d14);
+scene.fog = new THREE.Fog(0x0a0d14, 20, 80);
+
+const camera = new THREE.PerspectiveCamera(50, 2, 0.5, 200);
+camera.position.set(12, 10, 12);
+camera.lookAt(3, 2, 1.3);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(3, 2.2, 1.3);
+controls.enableDamping = true;
+controls.update();
+
+// Grid
+const grid = new THREE.GridHelper(20, 20, 0x242b3a, 0x141a26);
+scene.add(grid);
+
+// Lights
+scene.add(new THREE.AmbientLight(0x404060, 2));
+const sun = new THREE.DirectionalLight(0xffffff, 3);
+sun.position.set(10, 15, 5); scene.add(sun);
+const fill = new THREE.DirectionalLight(0x4488cc, 1);
+fill.position.set(-5, 3, -5); scene.add(fill);
+
+// Materials
+const mats = {
+  IfcColumn: new THREE.MeshStandardMaterial({color:0xe0553d, roughness:0.5, metalness:0.1}),
+  IfcBeam: new THREE.MeshStandardMaterial({color:0x3d7ae0, roughness:0.5, metalness:0.1}),
+  IfcSlab: new THREE.MeshStandardMaterial({color:0x8896a0, roughness:0.6, metalness:0.05}),
+  IfcStair: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
+  IfcStairFlight: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
+  IfcRailing: new THREE.MeshStandardMaterial({color:0x666666, roughness:0.4, metalness:0.3}),
+  select: new THREE.MeshStandardMaterial({color:0x00ff88, roughness:0.3, emissive:0x00ff44, emissiveIntensity:0.5, transparent:true, opacity:0.6}),
+};
+
+let modelGroup = new THREE.Group(); scene.add(modelGroup);
+let selectBox = null;
+
+// ── Load IFC geometry from server ──
+const API = 'http://localhost:8765';
+let geoData = null;
+let selectMode = false, pointA = null, pointB = null, stairwellDefined = false;
+
+async function loadGeometry() {
+  const resp = await fetch(API+'/api/geometry');
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  geoData = data;
+  renderGeometry(data);
+  document.getElementById('file-info').innerHTML = `<span class="pill pill-green">✅ ${data.summary}</span>`;
+  document.getElementById('select-section').style.display = 'block';
+  document.getElementById('ai-section').style.display = 'block';
+}
+
+function renderGeometry(data) {
+  modelGroup.clear();
+  data.elements.forEach(el => {
+    let [px, py, pz] = el.pos;
+    let [sx, sy, sz] = el.size;
+
+    // Simple visualization: place colored boxes at element positions
+    let w, h, d, cx, cy, cz;
+    if (el.type === 'IfcColumn') {
+      w=0.5; h=4.5; d=0.5; cx=px/1000; cy=pz/1000+2.25; cz=py/1000;
+    } else if (el.type === 'IfcBeam') {
+      // Beam: show as horizontal bar. Determine orientation from size ratios.
+      if (sz > sx * 3) {
+        // Long extrusion = horizontal. Assume span along X.
+        w = sz/1000; h = Math.max(sx,sy)/1000; d = Math.min(sx,sy)/1000;
+        cx = px/1000 + w/2; cy = pz/1000 + h/2; cz = py/1000 + d/2;
+      } else {
+        // Short - might be a stub or incorrectly sized. Show as small bar.
+        w = Math.max(sx,sz)/1000; h = Math.min(sx,sy)/1000; d = Math.min(sx,sy)/1000;
+        cx = px/1000 + w/2; cy = pz/1000; cz = py/1000 + d/2;
+      }
+    } else if (el.type === 'IfcSlab') {
+      w=sx/1000; h=0.15; d=sy/1000; cx=px/1000; cy=pz/1000; cz=py/1000;
+    } else {
+      w=0.3; h=0.3; d=0.3; cx=px/1000; cy=pz/1000; cz=py/1000;
+    }
+
+    const geo = new THREE.BoxGeometry(w || 0.2, h || 0.2, d || 0.2);
+    const mat = mats[el.type] || mats.IfcSlab;
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(cx, cy, cz);
+    mesh.userData = { id:el.global_id, type:el.type, name:el.name, pos:[px,py,pz], size:[sx,sy,sz] };
+    modelGroup.add(mesh);
+  });
+  // Fit camera
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  const center = box.getCenter(new THREE.Vector3());
+  controls.target.copy(center);
+  camera.position.set(center.x+8, center.y+8, center.z+8);
+  controls.update();
+}
+
+// ── Selection ──
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+canvas.addEventListener('click', (e) => {
+  if (!selectMode) return;
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
+  mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(modelGroup.children);
+  if (hits.length === 0) return;
+
+  const hit = hits[0].point;
+  const pt = [Math.round(hit.x*1000), Math.round(hit.z*1000)]; // convert back to mm, XZ plane
+
+  if (!pointA) {
+    pointA = pt;
+    showSelectMarker(hit.x, hit.y, hit.z);
+    setHint(`角1: (${pt[0]}, ${pt[1]})mm — 现在点对角`);
+  } else {
+    pointB = pt;
+    showSelectMarker(hit.x, hit.y, hit.z);
+    stairwellDefined = true;
+    selectMode = false;
+    const len = Math.abs(pointB[0]-pointA[0]);
+    const wid = Math.abs(pointB[1]-pointA[1]);
+    document.getElementById('v-length').textContent = len;
+    document.getElementById('v-width').textContent = wid;
+    document.getElementById('v-height').textContent = geoData.floorHeight || 4500;
+    document.getElementById('stairwell-section').style.display = 'block';
+    document.getElementById('btn-design').disabled = false;
+    document.getElementById('select-info').innerHTML = `<span class="pill pill-green">✅ ${len}×${wid}mm</span>`;
+    setHint('楼梯间已选定，点击 AI 设计');
+    // Draw selection rectangle
+    drawSelectRect(pointA, pointB);
+  }
+});
+
+function showSelectMarker(x, y, z) {
+  const dot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15, 16, 16),
+    new THREE.MeshBasicMaterial({color:0x00ff88})
+  );
+  dot.position.set(x, z, y);
+  modelGroup.add(dot);
+}
+
+function drawSelectRect(a, b) {
+  if (selectBox) modelGroup.remove(selectBox);
+  const cx = (a[0]+b[0])/2000, cz = (a[1]+b[1])/2000;
+  const sx = Math.abs(b[0]-a[0])/1000, sy = Math.abs(b[1]-a[1])/1000;
+  const geo = new THREE.BoxGeometry(sx||0.1, 0.05, sy||0.1);
+  selectBox = new THREE.Mesh(geo, mats.select);
+  selectBox.position.set(cx, 0.02, cz);
+  modelGroup.add(selectBox);
+}
+
+function setHint(msg) { document.getElementById('hint').textContent = msg; }
+
+window.startSelect = function() {
+  selectMode = true; pointA = null; pointB = null;
+  if (selectBox) { modelGroup.remove(selectBox); selectBox = null; }
+  document.getElementById('select-info').textContent = '请点击第一个角...';
+  setHint('点击三维模型中的楼梯间角落');
+};
+
+// ── Design ──
+window.doDesign = async function() {
+  if (!stairwellDefined) return alert('请先框选楼梯间');
+  const btn = document.getElementById('btn-design');
+  const st = document.getElementById('status');
+  btn.disabled = true; st.textContent = '🤖 AI 设计中...';
+  const len = Math.abs(pointB[0]-pointA[0]);
+  const wid = Math.abs(pointB[1]-pointA[1]);
+  const h = geoData.floorHeight || 4500;
+  const payload = {
+    stairwell: { length_mm:len, width_mm:wid, floor_height_mm:h, beam_top:h-50, beam_depth:400 },
+    api_key: document.getElementById('key-inp').value,
+    model: document.getElementById('model-sel').value
+  };
+  try {
+    const r = await fetch(API+'/api/design', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    const d = await r.json();
+    st.textContent = '✅ '+d.source;
+    const div = document.getElementById('design-result');
+    let html = '';
+    d.design.flights.forEach(f => { html += `<div>🏃 ${f.name}: ${f.n}级 ↑${f.riser} →${f.tread}mm</div>`; });
+    d.design.landings.forEach(l => { html += `<div>🪜 ${l.name}: ${l.l}×${l.w}×${l.t}mm 标高${l.el}mm</div>`; });
+    html += `<div>🛡 ${d.errors?.length||0} 个规范问题</div>`;
+    div.innerHTML = html;
+    document.getElementById('btn-download').style.display = 'block';
+    window._lastDesign = { flights:d.design.flights, landings:d.design.landings, railings:d.design.railings, stairwell:payload.stairwell, width_mm:d.design.flights[0] ? (d.design.flights[0].riser * 0 + 1200) : 1200 };
+
+    // Also render stair geometry
+    const sr = await fetch(API+'/api/generate-ifc', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...window._lastDesign, stairwell_width_mm:wid}) });
+    if (sr.ok) {
+      // Load generated stair geometry
+      const stairGeo = await fetch(API+'/api/geometry');
+      const sg = await stairGeo.json();
+      if (!sg.error) renderGeometry(sg);
+    }
+  } catch(e) { st.textContent = '❌ '+e.message; }
+  btn.disabled = false;
+};
+
+window.doDownload = async function() {
+  if (!window._lastDesign) return;
+  const w = Math.abs(pointB[1]-pointA[1]);
+  const r = await fetch(API+'/api/generate-ifc', { method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({...window._lastDesign, stairwell_width_mm:w}) });
+  const blob = await r.blob();
+  const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='stair_design.ifc'; a.click();
+};
+
+// ── File Upload ──
+document.getElementById('fu').addEventListener('change', async function() {
+  const f = this.files[0]; if (!f) return;
+  document.getElementById('file-info').textContent = '上传中...';
+  const fd = new FormData(); fd.append('file', f);
+  await fetch(API+'/api/analyze', { method:'POST', body:fd });
+  loadGeometry();
+});
+
+// ── Resize ──
+function resize() {
+  const w = viewer.clientWidth, h = viewer.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w/h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize); resize();
+
+// ── Render loop ──
+function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
+animate();
+
+// Export for HTML onclick
+window._skipLoad = loadGeometry;
+</script>
+</body>
+</html>
