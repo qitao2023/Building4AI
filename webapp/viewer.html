@@ -260,25 +260,86 @@ function getBox(el) {
 function renderGeometry(data) {
   modelGroup.clear();
 
+  const walls = [], openings = [], others = [];
   for (const el of data.elements) {
-    // Skip opening elements — they're already cut out of parent wall/slab faces
-    if (el.type === 'IfcOpeningElement') continue;
+    if (el.type === 'IfcWall') walls.push(el);
+    else if (el.type === 'IfcOpeningElement') openings.push(el);
+    else others.push(el);
+  }
 
-    // If server sent triangulated faces (walls/slabs with openings), use exact geometry
-    if (el.faces && el.faces.length > 0) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(el.faces, 3));
-      geo.computeVertexNormals();
-      const mat = (mats[el.type] || mats.IfcSlab).clone();
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.userData = { id: el.global_id, type: el.type, name: el.name };
-      modelGroup.add(mesh);
+  // Render non-wall elements
+  for (const el of others) {
+    const b = getBox(el);
+    addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
+  }
+
+  // Render walls as extruded shapes with hole cutouts
+  for (const wEl of walls) {
+    const wb = getBox(wEl);
+    const wOps = [];
+    for (const oEl of openings) {
+      if (oEl.parent_wall !== wEl.global_id) continue;
+      wOps.push(getBox(oEl));
+    }
+
+    if (wOps.length === 0) {
+      addBox(wb.cx, wb.cy, wb.cz, wb.w, wb.h, wb.d, wEl);
       continue;
     }
 
-    // Fallback: render as box using bbox
-    const b = getBox(el);
-    addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
+    const alongA = wb.dir === 'x' ? 'x' : 'z';
+    const wLen   = alongA === 'x' ? wb.w : wb.d;
+    const wThick = alongA === 'x' ? wb.d : wb.w;
+    const wH     = wb.h;
+    const wStart = alongA === 'x' ? wb.xMin : wb.zMin;
+    const wBot   = wb.yMin;
+
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(wLen, 0);
+    shape.lineTo(wLen, wH);
+    shape.lineTo(0, wH);
+    shape.closePath();
+
+    for (const op of wOps) {
+      const eps = 0.002;
+      const opStart = alongA === 'x' ? op.xMin : op.zMin;
+      const opLen   = alongA === 'x' ? op.w : op.d;
+      const opBot   = op.yMin;
+      const opH     = op.h;
+
+      let hx = opStart - wStart;
+      let hy = opBot - wBot;
+      let hw = opLen;
+      let hh = opH;
+      if (hy < eps) { hy = eps; hh -= eps; }
+      if (hy + hh > wH - eps) { hh = wH - eps - hy; }
+      if (hx < eps) { hx = eps; hw -= eps; }
+      if (hx + hw > wLen - eps) { hw = wLen - eps - hx; }
+      if (hw <= 0 || hh <= 0) continue;
+
+      const hole = new THREE.Path();
+      hole.moveTo(hx, hy);
+      hole.lineTo(hx + hw, hy);
+      hole.lineTo(hx + hw, hy + hh);
+      hole.lineTo(hx, hy + hh);
+      hole.closePath();
+      shape.holes.push(hole);
+    }
+
+    const geo = new THREE.ExtrudeGeometry(shape, { steps: 1, depth: wThick, bevelEnabled: false });
+    const mat = mats[wb.el.type] || mats.IfcSlab;
+    const mesh = new THREE.Mesh(geo, mat);
+
+    if (wb.dir === 'x') {
+      mesh.position.set(wStart, wBot, wb.zMin);
+    } else {
+      mesh.rotation.y = -Math.PI / 2;
+      mesh.position.set(wb.xMax, wBot, wStart);
+    }
+
+    mesh.userData = { id: wb.el.global_id, type: wb.el.type, name: wb.el.name };
+    modelGroup.add(mesh);
   }
 
   // Fit camera
