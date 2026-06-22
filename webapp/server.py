@@ -122,8 +122,43 @@ def call_ai(sw, key, model, endpoint):
 
 def algo_design(sw):
     L,W,H=sw["length_mm"],sw["width_mm"],sw["floor_height_mm"]
-    tr=round(H/150); rh=H/tr; rpf=tr//2; td=280; sw2=min(W-300,1200); sw2=max(sw2,1100); fl=rpf*td; ll=max(round((L-fl)/2),1200)
-    return {"type":"double_run","width_mm":sw2,"flights":[{"id":"F1","name":"第一跑","tread_count":rpf,"riser_height_mm":round(rh),"tread_depth_mm":td,"start_at_bottom":True,"length_mm":fl,"height_mm":round(rh*rpf)},{"id":"F2","name":"第二跑","tread_count":tr-rpf,"riser_height_mm":round(rh),"tread_depth_mm":td,"start_at_bottom":False,"length_mm":(tr-rpf)*td,"height_mm":round(rh*(tr-rpf))}],"landings":[{"id":"L1","name":"中间平台","length_mm":ll,"width_mm":W,"thickness_mm":150,"elevation_mm":round(rh*rpf)},{"id":"L2","name":"楼层平台","length_mm":ll,"width_mm":W,"thickness_mm":150,"elevation_mm":H}],"railings":[{"id":"R1","name":"左侧栏杆","height_mm":900},{"id":"R2","name":"右侧栏杆","height_mm":900}]}
+    # Stair width
+    sw2=min(W-300,1200); sw2=max(sw2,1100)
+    td=280  # tread depth
+    # Total risers from ideal 150mm rise
+    tr=round(H/150)
+    rh=H/tr
+    # Available X space (columns at both ends)
+    col_margin=250
+    avail=L-2*col_margin
+    # Landing: min 1200mm, proportional to available space
+    ll=max(round(avail/5),1200)
+    # Max flight length that fits
+    max_fl=(avail-ll)/2
+    # Constrain steps per flight to fit
+    ideal_rpf=tr//2
+    max_rpf=int(max_fl/td)
+    rpf=min(ideal_rpf,max_rpf)
+    rpf=max(rpf,3)  # at least 3 steps
+    # Recalculate with constrained steps
+    fl=rpf*td
+    f2_steps=tr-rpf
+    # Second flight: constrain to same max, or adjust if less
+    if f2_steps*td>max_fl:
+        f2_steps=max_rpf
+    fl2=f2_steps*td
+    fh1=round(rh*rpf)
+    fh2=round(rh*f2_steps)
+    return {"type":"double_run","width_mm":sw2,"flights":[
+        {"id":"F1","name":"第一跑","tread_count":rpf,"riser_height_mm":round(rh),"tread_depth_mm":td,"start_at_bottom":True,"length_mm":fl,"height_mm":fh1},
+        {"id":"F2","name":"第二跑","tread_count":f2_steps,"riser_height_mm":round(rh),"tread_depth_mm":td,"start_at_bottom":False,"length_mm":fl2,"height_mm":fh2}
+    ],"landings":[
+        {"id":"L1","name":"中间平台","length_mm":ll,"width_mm":W,"thickness_mm":150,"elevation_mm":fh1},
+        {"id":"L2","name":"楼层平台","length_mm":ll,"width_mm":W,"thickness_mm":150,"elevation_mm":H}
+    ],"railings":[
+        {"id":"R1","name":"左侧栏杆","height_mm":900},
+        {"id":"R2","name":"右侧栏杆","height_mm":900}
+    ]}
 
 def check_rules(d, sw):
     errs=[]
@@ -209,20 +244,20 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
     # Center stair in stairwell interior (account for 500mm columns)
     col_half = 250  # half column width
     x0 = col_half  # start after left column
-    y0 = (well_w_mm - sw_mm) // 2
-    sy2 = y0 - sw_mm//2  # left edge of stair
+    y_margin = (well_w_mm - sw_mm) // 2  # left margin for centering stair in well
+    # Step left edge = y_margin, step center = well_w_mm/2
 
     # Collect all new elements for batch spatial containment
     _stair_elements = []
 
-    # Landings
+    # Landings — fill entire stairwell width, starting from Y=0
     for ld in landings_data:
         slab = run("root.create_entity", model, ifc_class="IfcSlab", name=ld.get("name","Landing"))
         run("aggregate.assign_object", model, products=[slab], relating_object=stair)
         _stair_elements.append(slab)
-        ll=ld.get("l",1200); lw=ld.get("w",2700); lt=ld.get("t",150); el=ld.get("el",0)
+        ll=ld.get("l",1200); lw=ld.get("w",well_w_mm); lt=ld.get("t",150); el=ld.get("el",0)
         x_off = x0 if "楼层" in ld.get("name","") else x0 + fl1
-        mk_place(slab, x_off, y0 - lw//2, el)
+        mk_place(slab, x_off, 0, el)
         add_geom(slab, ll, lw, lt)
 
     # Flight 1 steps
@@ -232,7 +267,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F1')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
             _stair_elements.append(step)
-            mk_place(step, x0 + s*td, sy2, s*rh)
+            mk_place(step, x0 + s*td, y_margin, s*rh)
             add_geom(step, td, sw_mm, rh)
 
     # Flight 2 steps
@@ -243,7 +278,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F2')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
             _stair_elements.append(step)
-            mk_place(step, x0 + sx-(s+1)*td, sy2, mid_el+s*rh)
+            mk_place(step, x0 + sx-(s+1)*td, y_margin, mid_el+s*rh)
             add_geom(step, td, sw_mm, rh)
 
     # Railings
@@ -251,7 +286,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
         n=f.get("n",10); td=f.get("tread",280); rh_s=f.get("riser",150)
         if fi==0: sx,sz,xdir = x0,0,1
         else: sx,sz,xdir = x0+fl1+ll_val,mid_el,-1
-        for side, sy in [("L",sy2+50),("R",sy2+sw_mm-50)]:
+        for side, sy in [("L",y_margin+50),("R",y_margin+sw_mm-50)]:
             for si in range(0,n+1,3):
                 px=sx+xdir*min(si,n-1)*td+xdir*td//2; pz=sz+min(si,n-1)*rh_s
                 post=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Post_{fi}_{side}_{si}")
@@ -287,12 +322,14 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
 
     col_half = 250
     x0 = col_half
-    y0 = (well_w_mm - sw_mm) // 2  # left margin / center of stair in Y
+    # Stair centered in stairwell: margin on each side
+    y_margin = (well_w_mm - sw_mm) // 2
+    y_center = well_w_mm // 2  # center of stairwell = center of stair
 
-    # ── Landings (full stairwell width) ──
+    # ── Landings (fill full stairwell width, start at Y=0) ──
     for ld in landings:
         ll = ld.get("l", 1200)
-        lw = ld.get("w", well_w_mm)
+        lw = well_w_mm  # always full stairwell width
         lt = ld.get("t", 150)
         el = ld.get("el", 0)
         is_floor = "楼层" in ld.get("name", "")
@@ -301,7 +338,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
             "global_id": f"stair_landing_{ld.get('name','')}",
             "name": ld.get("name", "Landing"),
             "type": "IfcSlab",
-            "pos": [round(x_off + ll/2), round(y0), round(el)],
+            "pos": [round(x_off + ll/2), round(y_center), round(el)],
             "size": [round(ll), round(lw), max(round(lt), 150)],
             "color": "#aabbcc"
         })
@@ -314,7 +351,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                 "global_id": f"stair_F1_s{s+1}",
                 "name": f"{f.get('name','F1')}_s{s+1}",
                 "type": "IfcStairFlight",
-                "pos": [round(x0 + s*td + td/2), round(y0), round(s*rh)],
+                "pos": [round(x0 + s*td + td/2), round(y_center), round(s*rh)],
                 "size": [round(td), round(sw_mm), round(rh)],
                 "color": "#c8d6e5"
             })
@@ -328,7 +365,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                 "global_id": f"stair_F2_s{s+1}",
                 "name": f"{f.get('name','F2')}_s{s+1}",
                 "type": "IfcStairFlight",
-                "pos": [round(x0 + sx - (s+1)*td + td/2), round(y0), round(fh1 + s*rh)],
+                "pos": [round(x0 + sx - (s+1)*td + td/2), round(y_center), round(fh1 + s*rh)],
                 "size": [round(td), round(sw_mm), round(rh)],
                 "color": "#d6e0f0"
             })
@@ -349,7 +386,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                     "global_id": f"stair_post_{fi}_{side}_{si}",
                     "name": f"Post_F{fi+1}_{side}_{si}",
                     "type": "IfcRailing",
-                    "pos": [round(px), round(y0 - sw_mm//2 + sy_off), round(pz)],
+                    "pos": [round(px), round(y_margin + sy_off), round(pz)],
                     "size": [40, 40, 900],
                     "color": "#888888"
                 })

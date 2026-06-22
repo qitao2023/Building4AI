@@ -218,7 +218,7 @@ async function loadGeometry() {
   // Show stair design data if present (persisted from previous design)
   if (data.stairDesign) {
     const div = document.getElementById('design-result');
-    let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px;font-size:13px;">';
+    let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;color:#1b5e20;border-radius:6px;font-size:13px;">';
     sdHtml += '<b>📐 已加载楼梯设计</b><br>';
     if (data.stairDesign.flights) {
       data.stairDesign.flights.forEach(f => {
@@ -561,7 +561,7 @@ window.doDesign = async function() {
         renderGeometry(sg);
         // Show stair design data from server response
         if (sg.stairDesign) {
-          let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px;font-size:13px;">';
+          let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;color:#1b5e20;border-radius:6px;font-size:13px;">';
           sdHtml += '<b>📐 楼梯设计数据 (已叠加至三维)</b><br>';
           if (sg.stairDesign.flights) {
             sg.stairDesign.flights.forEach(f => {
