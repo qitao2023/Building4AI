@@ -33,6 +33,13 @@ input:focus,select:focus { border-color:var(--blue); }
 .section-title { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
 .hint { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.8); color:#fff; padding:8px 18px; border-radius:20px; font-size:13px; pointer-events:none; z-index:10; }
 #status { font-size:12px; color:var(--amber); margin-top:8px; text-align:center; min-height:18px; }
+/* Component panel — right side floating card */
+#component-panel { position:absolute; bottom:56px; right:16px; width:260px; max-height:50vh; background:rgba(17,22,32,0.94); border:1px solid var(--border); border-radius:12px; padding:16px; z-index:20; backdrop-filter:blur(8px); box-shadow:0 8px 32px rgba(0,0,0,0.5); overflow-y:auto; display:none; }
+#component-panel .section-title { margin-bottom:10px; }
+#component-panel .btn { margin-top:10px; }
+/* ViewCube — 3D orientation cube */
+#cube-canvas { position:absolute; top:16px; right:16px; width:60px; height:60px; z-index:21; cursor:pointer; border-radius:8px; }
+#cube-canvas:hover { filter:brightness(1.1); }
 </style>
 </head>
 <body>
@@ -86,7 +93,13 @@ input:focus,select:focus { border-color:var(--blue); }
 
 <div id="viewer">
   <canvas id="canvas"></canvas>
-  <div class="hint" id="hint">🖱 拖拽旋转 · 滚轮缩放 · 右键平移</div>
+  <canvas id="cube-canvas" width="120" height="120"></canvas>
+  <div id="component-panel">
+    <div class="section-title">🔍 构件属性</div>
+    <div id="component-info" style="font-size:12px"></div>
+    <button class="btn btn-outline btn-sm" id="btn-clear-pick" onclick="clearPick()" style="width:100%">✕ 取消选中</button>
+  </div>
+  <div class="hint" id="hint">🖱 拖拽旋转 · 滚轮缩放 · 右键平移 · 点击构件查看属性 · 双击方块面对正</div>
 </div>
 
 <script type="importmap">
@@ -95,6 +108,12 @@ input:focus,select:focus { border-color:var(--blue); }
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
 // ── Scene Setup ──
 const viewer = document.getElementById('viewer');
@@ -102,10 +121,12 @@ const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0a0d14);
-scene.fog = new THREE.Fog(0x0a0d14, 20, 80);
+scene.background = new THREE.Color(0x1a2230);
+scene.fog = new THREE.Fog(0x1a2230, 30, 120);
 
 const camera = new THREE.PerspectiveCamera(50, 2, 0.5, 200);
 camera.position.set(12, 10, 12);
@@ -120,23 +141,62 @@ controls.update();
 const grid = new THREE.GridHelper(20, 20, 0x242b3a, 0x141a26);
 scene.add(grid);
 
-// Lights
-scene.add(new THREE.AmbientLight(0x404060, 2));
-const sun = new THREE.DirectionalLight(0xffffff, 3);
+// Lights — balanced for omnidirectional visibility
+scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a3a3a, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 2);
 sun.position.set(10, 15, 5); scene.add(sun);
-const fill = new THREE.DirectionalLight(0x4488cc, 1);
+const fill = new THREE.DirectionalLight(0xffeedd, 2);
 fill.position.set(-5, 3, -5); scene.add(fill);
+const back = new THREE.DirectionalLight(0xaaccff, 1.5);
+back.position.set(-8, 5, 8); scene.add(back);
 
-// Materials
+// Environment map (procedural, no external files)
+const pmremGen = new THREE.PMREMGenerator(renderer);
+const envScene = new THREE.Scene();
+envScene.background = new THREE.Color(0x8899bb);
+envScene.add(new THREE.HemisphereLight(0xccccff, 0x445566, 1));
+scene.environment = pmremGen.fromScene(envScene, 0.04).texture;
+pmremGen.dispose();
+
+// Materials — unified colors
 const mats = {
-  IfcColumn: new THREE.MeshStandardMaterial({color:0xe0553d, roughness:0.5, metalness:0.1}),
-  IfcBeam: new THREE.MeshStandardMaterial({color:0x3d7ae0, roughness:0.5, metalness:0.1}),
-  IfcSlab: new THREE.MeshStandardMaterial({color:0x8896a0, roughness:0.6, metalness:0.05}),
+  IfcBeam:   new THREE.MeshStandardMaterial({color:0x45bda4, roughness:0.5, metalness:0.1}),   // 69,189,164 青绿
+  IfcColumn: new THREE.MeshStandardMaterial({color:0xdbae1f, roughness:0.5, metalness:0.1}),   // 219,174,31 金黄
+  IfcWall:   new THREE.MeshStandardMaterial({color:0xa4a1ac, roughness:0.55, metalness:0.05}), // 164,161,172 灰紫
+  IfcSlab:   new THREE.MeshStandardMaterial({color:0x8896a0, roughness:0.6, metalness:0.05}),
   IfcStair: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcStairFlight: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcRailing: new THREE.MeshStandardMaterial({color:0x666666, roughness:0.4, metalness:0.3}),
   select: new THREE.MeshStandardMaterial({color:0x00ff88, roughness:0.3, emissive:0x00ff44, emissiveIntensity:0.5, transparent:true, opacity:0.6}),
 };
+
+// ── Post Processing ──
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const ssaoPass = new SSAOPass(scene, camera);
+ssaoPass.kernelRadius = 0.5;
+ssaoPass.minDistance = 0.005;
+ssaoPass.maxDistance = 0.1;
+ssaoPass.output = SSAOPass.OUTPUT.Default;
+composer.addPass(ssaoPass);
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.15, 0.4, 0.85
+);
+composer.addPass(bloomPass);
+
+const outlinePass = new OutlinePass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), scene, camera
+);
+outlinePass.edgeStrength = 4;
+outlinePass.edgeGlow = 1.5;
+outlinePass.edgeThickness = 1;
+outlinePass.pulsePeriod = 0;
+outlinePass.visibleEdgeColor.set(0x00ff88);
+outlinePass.hiddenEdgeColor.set(0x00ff88);
+composer.addPass(outlinePass);
 
 let modelGroup = new THREE.Group(); scene.add(modelGroup);
 let selectBox = null;
@@ -157,40 +217,70 @@ async function loadGeometry() {
   document.getElementById('ai-section').style.display = 'block';
 }
 
+function addBox(cx, cy, cz, w, h, d, el) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mat = (mats[el.type] || mats.IfcSlab).clone();
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(cx, cy, cz);
+  mesh.userData = { id:el.global_id, type:el.type, name:el.name };
+  modelGroup.add(mesh);
+}
+
+function getBox(el) {
+  let [px, py, pz] = el.pos;
+  let [sx, sy, sz] = el.size;
+  let mx = px / 1000, my = pz / 1000, mz = -py / 1000;
+  let w, h, d, cx, cy, cz, dir = el.dir || 'x';
+
+  if (el.type === 'IfcColumn') {
+    w = sx / 1000; d = sy / 1000; h = sz / 1000;
+    cx = mx; cy = my + h / 2; cz = mz;
+  } else if (el.type === 'IfcBeam' || el.type === 'IfcWall' || el.type === 'IfcOpeningElement') {
+    let bw = sx / 1000, bh = sy / 1000, bl = sz / 1000;
+    if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + bh / 2; cz = mz; }
+    else             { w = bl; h = bh; d = bw; cx = mx; cy = my + bh / 2; cz = mz; }
+  } else if (el.type === 'IfcSlab') {
+    // Slab: flat horizontal. Size = [Xspan, Yspan, Zspan=thickness]
+    w = sx / 1000;
+    d = sy / 1000;
+    h = Math.max(sz / 1000, 0.12);
+    cx = mx; cy = my + h / 2; cz = mz;
+  } else {
+    w = sx / 1000 || 0.3; h = sy / 1000 || 0.3; d = sz / 1000 || 0.3;
+    cx = mx; cy = my; cz = mz;
+  }
+  return {
+    el, cx, cy, cz, w, h, d, dir,
+    xMin: cx - w/2, xMax: cx + w/2,
+    yMin: cy - h/2, yMax: cy + h/2,
+    zMin: cz - d/2, zMax: cz + d/2,
+  };
+}
+
 function renderGeometry(data) {
   modelGroup.clear();
-  data.elements.forEach(el => {
-    let [px, py, pz] = el.pos;
-    let [sx, sy, sz] = el.size;
 
-    // Simple visualization: place colored boxes at element positions
-    let w, h, d, cx, cy, cz;
-    if (el.type === 'IfcColumn') {
-      w=0.5; h=4.5; d=0.5; cx=px/1000; cy=pz/1000+2.25; cz=py/1000;
-    } else if (el.type === 'IfcBeam') {
-      // Beam: show as horizontal bar. Determine orientation from size ratios.
-      if (sz > sx * 3) {
-        // Long extrusion = horizontal. Assume span along X.
-        w = sz/1000; h = Math.max(sx,sy)/1000; d = Math.min(sx,sy)/1000;
-        cx = px/1000 + w/2; cy = pz/1000 + h/2; cz = py/1000 + d/2;
-      } else {
-        // Short - might be a stub or incorrectly sized. Show as small bar.
-        w = Math.max(sx,sz)/1000; h = Math.min(sx,sy)/1000; d = Math.min(sx,sy)/1000;
-        cx = px/1000 + w/2; cy = pz/1000; cz = py/1000 + d/2;
-      }
-    } else if (el.type === 'IfcSlab') {
-      w=sx/1000; h=0.15; d=sy/1000; cx=px/1000; cy=pz/1000; cz=py/1000;
-    } else {
-      w=0.3; h=0.3; d=0.3; cx=px/1000; cy=pz/1000; cz=py/1000;
+  for (const el of data.elements) {
+    // Skip opening elements — they're already cut out of parent wall/slab faces
+    if (el.type === 'IfcOpeningElement') continue;
+
+    // If server sent triangulated faces (walls/slabs with openings), use exact geometry
+    if (el.faces && el.faces.length > 0) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(el.faces, 3));
+      geo.computeVertexNormals();
+      const mat = (mats[el.type] || mats.IfcSlab).clone();
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData = { id: el.global_id, type: el.type, name: el.name };
+      modelGroup.add(mesh);
+      continue;
     }
 
-    const geo = new THREE.BoxGeometry(w || 0.2, h || 0.2, d || 0.2);
-    const mat = mats[el.type] || mats.IfcSlab;
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(cx, cy, cz);
-    mesh.userData = { id:el.global_id, type:el.type, name:el.name, pos:[px,py,pz], size:[sx,sy,sz] };
-    modelGroup.add(mesh);
-  });
+    // Fallback: render as box using bbox
+    const b = getBox(el);
+    addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
+  }
+
   // Fit camera
   const box = new THREE.Box3().setFromObject(modelGroup);
   const center = box.getCenter(new THREE.Vector3());
@@ -323,20 +413,344 @@ document.getElementById('fu').addEventListener('change', async function() {
   loadGeometry();
 });
 
+// ── Component Picking ──
+let pointerDown = new THREE.Vector2(), pointerUp = new THREE.Vector2();
+let pickedMesh = null;
+
+canvas.addEventListener('pointerdown', e => pointerDown.set(e.clientX, e.clientY));
+canvas.addEventListener('pointerup', e => {
+  pointerUp.set(e.clientX, e.clientY);
+  const dx = pointerUp.x - pointerDown.x, dy = pointerUp.y - pointerDown.y;
+  if (Math.sqrt(dx*dx + dy*dy) < 3) {
+    if (selectMode) return; // stairwell mode uses its own click handler
+    doComponentPick(e);
+  }
+});
+
+function doComponentPick(e) {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(modelGroup.children, true);
+  if (hits.length === 0) { clearPick(); return; }
+  let mesh = hits[0].object;
+  while (mesh && (!mesh.userData || !mesh.userData.type)) mesh = mesh.parent;
+  if (mesh?.userData?.type) selectMesh(mesh);
+  else clearPick();
+}
+
+function selectMesh(mesh) {
+  if (pickedMesh && pickedMesh.material._origEmissive) {
+    pickedMesh.material.emissive.copy(pickedMesh.material._origEmissive);
+    pickedMesh.material.emissiveIntensity = pickedMesh.material._origEmissiveIntensity;
+  }
+  pickedMesh = mesh;
+  if (!mesh.material._origEmissive) {
+    mesh.material._origEmissive = (mesh.material.emissive || new THREE.Color(0)).clone();
+    mesh.material._origEmissiveIntensity = mesh.material.emissiveIntensity || 0;
+  }
+  mesh.material.emissive = new THREE.Color(0x00ff44);
+  mesh.material.emissiveIntensity = 0.5;
+  outlinePass.selectedObjects = [mesh];
+  updateComponentPanel(mesh);
+}
+
+function updateComponentPanel(mesh) {
+  const d = mesh.userData;
+  const panel = document.getElementById('component-panel');
+  panel.style.display = 'block';
+  const names = { IfcColumn:'柱', IfcBeam:'梁', IfcWall:'墙', IfcSlab:'楼板', IfcStair:'楼梯', IfcStairFlight:'梯段', IfcRailing:'栏杆' };
+  document.getElementById('component-info').innerHTML = `
+    <span class="pill pill-blue">${names[d.type]||d.type}</span>
+    <span class="pill pill-amber" style="margin-left:4px">${d.type}</span>
+    <div style="margin-top:6px;font-size:11px;color:var(--text2)">${d.name||'—'}</div>
+    <div style="font-size:10px;color:var(--text2);word-break:break-all;margin-top:4px">ID: ${d.id||'—'}</div>`;
+}
+window.clearPick = function() {
+  if (pickedMesh?.material._origEmissive) {
+    pickedMesh.material.emissive.copy(pickedMesh.material._origEmissive);
+    pickedMesh.material.emissiveIntensity = pickedMesh.material._origEmissiveIntensity;
+  }
+  pickedMesh = null;
+  outlinePass.selectedObjects = [];
+  document.getElementById('component-panel').style.display = 'none';
+};
+
+// ── 3D ViewCube ──
+const cubeCanvas = document.getElementById('cube-canvas');
+const cubeRenderer = new THREE.WebGLRenderer({canvas: cubeCanvas, antialias: true, alpha: true});
+cubeRenderer.setSize(120, 120);
+cubeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+cubeRenderer.setClearColor(0x000000, 0);
+
+const cubeScene = new THREE.Scene();
+const cubeCamera = new THREE.OrthographicCamera(-1.25, 1.25, 1.25, -1.25, 0.1, 10);
+cubeCamera.position.set(1.25, 1.05, 1.35);
+cubeCamera.lookAt(0, 0, 0);
+
+function makeLabel(c, bg) {
+  const s = 256, pad = 14, cnv = document.createElement('canvas');
+  cnv.width = s; cnv.height = s;
+  const ctx = cnv.getContext('2d');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, s, s);
+  const g = ctx.createLinearGradient(0, 0, s, s);
+  g.addColorStop(0, 'rgba(255,255,255,0.06)'); g.addColorStop(1, 'rgba(0,0,0,0.10)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, s, s);
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 5;
+  ctx.strokeRect(pad, pad, s - 2*pad, s - 2*pad);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 72px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(c, s/2, s/2);
+  return new THREE.CanvasTexture(cnv);
+}
+
+// RoundedBoxGeometry — small radius for chamfered-corner look
+const cubeGeo = new RoundedBoxGeometry(1, 1, 1, 4, 0.14);
+const cubeMesh = new THREE.Mesh(cubeGeo, [
+  makeLabel('右','#2e6b47'), makeLabel('左','#8b5530'),
+  makeLabel('上','#3b6fb6'), makeLabel('下','#5e4a3d'),
+  makeLabel('前','#3b5998'), makeLabel('后','#4a4a55'),
+].map(tex => new THREE.MeshBasicMaterial({map: tex})));
+cubeScene.add(cubeMesh);
+
+// Edge lines on rounded box
+const edgeGeo = new THREE.EdgesGeometry(cubeGeo);
+const edgeLine = new THREE.LineSegments(edgeGeo,
+  new THREE.LineBasicMaterial({color: 0xdddddd, transparent: true, opacity: 0.45}));
+cubeScene.add(edgeLine);
+
+// Invisible pick targets — slightly larger than cube to catch clicks
+const iv = new THREE.MeshBasicMaterial({visible: false});
+const pickGroup = new THREE.Group(); cubeScene.add(pickGroup);
+const corners = [];
+for (let x = -1; x <= 1; x += 2)
+  for (let y = -1; y <= 1; y += 2)
+    for (let z = -1; z <= 1; z += 2) {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.20, 8, 8), iv);
+      s.position.set(x*0.5, y*0.5, z*0.5);
+      s.userData = { kind:'corner', dir: new THREE.Vector3(x,y,z).normalize() };
+      pickGroup.add(s); corners.push(s);
+    }
+
+const edgeDefs = [
+  [0,0.5,0.5, 0.05,1,0.05],[0,0.5,-0.5, 0.05,1,0.05],
+  [0.5,0,0.5, 1,0.05,0.05],[0.5,0,-0.5, 1,0.05,0.05],
+  [-0.5,0,0.5, 1,0.05,0.05],[-0.5,0,-0.5, 1,0.05,0.05],
+  [0.5,0.5,0, 1,1,0.05],[-0.5,0.5,0, 1,1,0.05],
+  [0.5,-0.5,0, 1,1,0.05],[-0.5,-0.5,0, 1,1,0.05],
+  [0,0.5,0.5, 0.05,1,1],[0,-0.5,0.5, 0.05,1,1],
+];
+edgeDefs.forEach(([cx,cy,cz,sx,sy,sz]) => {
+  const e = new THREE.Mesh(new THREE.BoxGeometry(sx,sy,sz), iv);
+  e.position.set(cx,cy,cz); e.userData = { kind:'edge' };
+  pickGroup.add(e);
+});
+
+const faceNormals = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+faceNormals.forEach(([nx,ny,nz]) => {
+  const f = new THREE.Mesh(new THREE.BoxGeometry(
+    nx?0.04:1.04, ny?0.04:1.04, nz?0.04:1.04), iv);
+  f.position.set(nx*0.5, ny*0.5, nz*0.5);
+  f.userData = { kind:'face', dir: new THREE.Vector3(nx,ny,nz) };
+  pickGroup.add(f);
+});
+
+// Cube interaction: single click = smooth fly, double click = instant face snap
+const cubeRay = new THREE.Raycaster();
+const cubeMouse = new THREE.Vector2();
+let clickTimer = null;
+let lastFaceNormal = null;
+
+cubeCanvas.addEventListener('click', (e) => {
+  const rect = cubeCanvas.getBoundingClientRect();
+  cubeMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  cubeMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  cubeRay.setFromCamera(cubeMouse, cubeCamera);
+
+  // Detect what was hit
+  let hitKind = null, hitDir = null;
+  const cHits = cubeRay.intersectObjects(corners);
+  if (cHits.length > 0) { hitKind = 'corner'; hitDir = cHits[0].object.userData.dir; }
+
+  if (!hitKind) {
+    const allHits = cubeRay.intersectObjects(pickGroup.children);
+    for (const h of allHits) {
+      if (h.object.userData.kind === 'edge') {
+        const lp = h.object.worldToLocal(h.point.clone());
+        const raw = [
+          { axis:0, val:Math.abs(lp.x), sign:Math.sign(lp.x)||1 },
+          { axis:1, val:Math.abs(lp.y), sign:Math.sign(lp.y)||1 },
+          { axis:2, val:Math.abs(lp.z), sign:Math.sign(lp.z)||1 },
+        ].sort((a,b) => b.val - a.val);
+        hitDir = new THREE.Vector3();
+        hitDir.setComponent(raw[0].axis, raw[0].sign);
+        hitDir.setComponent(raw[1].axis, raw[1].sign);
+        hitDir.normalize();
+        hitKind = 'edge'; break;
+      }
+    }
+  }
+
+  if (!hitKind) {
+    const fHits = cubeRay.intersectObjects(cubeMesh);
+    if (fHits.length > 0) {
+      // Use LOCAL face normal — always a clean cardinal direction
+      hitDir = fHits[0].face.normal.clone();
+      hitKind = 'face';
+    }
+  }
+
+  if (!hitKind) return;
+
+  if (hitKind === 'face') {
+    // Double-click detection: compare LOCAL normals (never change with cube rotation)
+    const dirKey = hitDir.toArray().map(v => v.toFixed(0)).join(',');
+    if (clickTimer && lastFaceNormal === dirKey) {
+      // Double click on same face → snap instantly to pure orthogonal view
+      clearTimeout(clickTimer);
+      clickTimer = null;
+      lastFaceNormal = null;
+      snapToFace(hitDir);
+      return;
+    }
+    lastFaceNormal = dirKey;
+    clickTimer = setTimeout(() => { clickTimer = null; lastFaceNormal = null; flyToDir(hitDir); }, 300);
+  } else {
+    // Corner or edge — single click fly (directions already canonical from userData / edge math)
+    flyToDir(hitDir);
+  }
+});
+
+// ── Orthographic camera for flat elevation snaps ──
+const orthoCamera = new THREE.OrthographicCamera(-5, 5, 5, -5, 0.1, 500);
+let useOrtho = false;
+
+// Switch back to perspective when user interacts
+controls.addEventListener('start', () => {
+  if (useOrtho) {
+    useOrtho = false;
+    camera.position.copy(orthoCamera.position);
+    camera.quaternion.copy(orthoCamera.quaternion);
+    camera.up.copy(orthoCamera.up);
+    const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    controls.target.copy(camera.position).addScaledVector(lookDir, 1);
+    controls.update();
+  }
+});
+
+function snapToFace(normal) {
+  const { center, dist } = getModelInfo();
+  flyTarget = null;
+
+  // Camera's local +Z = normal → local -Z (look dir) = -normal → looks toward center
+  const zDir = normal.clone();
+  const upRef = Math.abs(normal.y) > 0.99
+    ? new THREE.Vector3(0, 0, normal.y > 0 ? -1 : 1)
+    : new THREE.Vector3(0, 1, 0);
+
+  // Orthonormal basis for camera orientation
+  const xDir = new THREE.Vector3().crossVectors(upRef, zDir).normalize();
+  const yDir = new THREE.Vector3().crossVectors(zDir, xDir).normalize();
+  const rotM = new THREE.Matrix4().makeBasis(xDir, yDir, zDir);
+  orthoCamera.quaternion.setFromRotationMatrix(rotM);
+  orthoCamera.up.copy(yDir);
+
+  // Position camera along normal, at distance that shows full model
+  orthoCamera.position.copy(center).addScaledVector(normal, dist);
+
+  // Frustum sized to model
+  const aspect = viewer.clientWidth / viewer.clientHeight;
+  const halfH = dist * 0.65;
+  const halfW = halfH * aspect;
+  orthoCamera.left = -halfW;
+  orthoCamera.right = halfW;
+  orthoCamera.top = halfH;
+  orthoCamera.bottom = -halfH;
+  orthoCamera.near = 0.01;
+  orthoCamera.far = dist * 5;
+  orthoCamera.updateProjectionMatrix();
+  orthoCamera.updateMatrixWorld();
+  useOrtho = true;
+
+  // Sync perspective camera
+  camera.position.copy(orthoCamera.position);
+  camera.quaternion.copy(orthoCamera.quaternion);
+  camera.up.copy(orthoCamera.up);
+  controls.target.copy(center);
+  controls.update();
+}
+
+// ── Fly animation ──
+let flyTarget = null;
+
+function getModelInfo() {
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  if (box.isEmpty()) return { center: new THREE.Vector3(), dist: 6 };
+  const center = box.getCenter(new THREE.Vector3());
+  const dist = Math.max(...box.getSize(new THREE.Vector3()).toArray()) * 1.6;
+  return { center, dist };
+}
+
+function flyToDir(dir) {
+  const { center, dist } = getModelInfo();
+  flyTarget = {
+    pos: new THREE.Vector3(center.x + dir.x * dist, center.y + dir.y * dist, center.z + dir.z * dist),
+    target: center.clone()
+  };
+}
+
 // ── Resize ──
 function resize() {
   const w = viewer.clientWidth, h = viewer.clientHeight;
   renderer.setSize(w, h);
+  composer.setSize(w, h);
+  outlinePass.setSize(w, h);
   camera.aspect = w/h;
   camera.updateProjectionMatrix();
+  if (useOrtho) {
+    const aspect = w / h;
+    const halfH = (orthoCamera.top - orthoCamera.bottom) / 2;
+    orthoCamera.left = -halfH * aspect;
+    orthoCamera.right = halfH * aspect;
+    orthoCamera.updateProjectionMatrix();
+  }
 }
 window.addEventListener('resize', resize); resize();
 
 // ── Render loop ──
-function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
+function animate() {
+  requestAnimationFrame(animate);
+
+  if (flyTarget && !useOrtho) {
+    const f = 0.12;
+    camera.position.lerp(flyTarget.pos, f);
+    controls.target.lerp(flyTarget.target, f);
+    if (camera.position.distanceTo(flyTarget.pos) < 0.05 &&
+        controls.target.distanceTo(flyTarget.target) < 0.02) {
+      camera.position.copy(flyTarget.pos);
+      controls.target.copy(flyTarget.target);
+      flyTarget = null;
+    }
+  }
+
+  if (useOrtho) {
+    controls.update();
+    renderer.render(scene, orthoCamera);
+  } else {
+    controls.update();
+    composer.render();
+  }
+
+  // Sync & render ViewCube
+  cubeMesh.quaternion.copy(camera.quaternion);
+  edgeLine.quaternion.copy(camera.quaternion);
+  cubeRenderer.render(cubeScene, cubeCamera);
+}
 animate();
 
-// Export for HTML onclick
+// Export
 window._skipLoad = loadGeometry;
 </script>
 </body>

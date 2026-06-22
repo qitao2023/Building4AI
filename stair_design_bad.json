@@ -1,0 +1,58 @@
+{
+  "project": "办公楼楼梯间B-有违规",
+  "design_code": "GB 50010-2010",
+  "stairwell": {
+    "length_mm": 5400,
+    "width_mm": 2400,
+    "floor_height_mm": 4500,
+    "beam_position_top_mm": 3200,
+    "beam_depth_mm": 500
+  },
+  "stair": {
+    "type": "double_run",
+    "width_mm": 1000,
+    "flights": [
+      {
+        "id": "F1",
+        "name": "第一跑",
+        "tread_count": 8,
+        "riser_height_mm": 190,
+        "tread_depth_mm": 250,
+        "start_at_bottom": true,
+        "length_mm": 2000,
+        "height_mm": 1520
+      },
+      {
+        "id": "F2",
+        "name": "第二跑",
+        "tread_count": 8,
+        "riser_height_mm": 190,
+        "tread_depth_mm": 250,
+        "start_at_bottom": false,
+        "length_mm": 2000,
+        "height_mm": 1520
+      }
+    ],
+    "landings": [
+      {
+        "id": "L1",
+        "name": "中间平台",
+        "length_mm": 1000,
+        "width_mm": 2400,
+        "thickness_mm": 150,
+        "elevation_mm": 1520
+      }
+    ],
+    "railings": []
+  },
+  "materials": {
+    "concrete_grade": "C25"
+  },
+  "rules": {
+    "riser_max_mm": 175,
+    "tread_min_mm": 260,
+    "headroom_min_mm": 2200,
+    "stair_width_min_mm": 1100,
+    "landing_depth_min_mm": 1200
+  }
+}

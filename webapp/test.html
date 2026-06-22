@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Test</title>
+<style>body{background:#0a0d14;color:#e4e8f0;font-family:sans-serif;padding:40px}h1{color:#3b82f6}</style>
+</head><body>
+<h1>✅ 页面渲染正常</h1>
+<p>如果看到这行字，说明 HTML/CSS 没问题。</p>
+<p>问题出在 index.html 的 JS 部分。</p>
+<div id="out" style="margin-top:20px;padding:16px;background:#111;border-radius:8px"></div>
+<script>
+var $ = id => document.getElementById(id);
+$('out').innerHTML = 'JS 也能正常运行 ✅';
+</script>
+</body></html>

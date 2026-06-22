@@ -1,0 +1,116 @@
+{
+  "file": "ai_generated.ifc",
+  "schema": "IFC4",
+  "description": "AI Designed Test Structure",
+  "spatial_structure": [
+    {
+      "global_id": "1JlMOBVkf1ifWOKK4xz5Lp",
+      "name": "Default Site",
+      "ifc_type": "IfcSite",
+      "buildings": [
+        {
+          "global_id": "3YAv8ryAf76P42gwfbQRaT",
+          "name": "Default Building",
+          "ifc_type": "IfcBuilding",
+          "storeys": [
+            {
+              "global_id": "1sZ55UQj10Axc0aaOX_1WN",
+              "name": "Level 1",
+              "ifc_type": "IfcBuildingStorey",
+              "elements": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "elements": [
+    {
+      "global_id": "1eMQrhCgT1H8SFEHotyx4S",
+      "name": "KL1",
+      "ifc_type": "IfcBeam",
+      "description": null,
+      "properties": {
+        "AI_Design_Parameters": {
+          "Width": 300,
+          "Depth": 700,
+          "Length": 6000
+        }
+      },
+      "materials": [
+        "C30"
+      ],
+      "storey": {
+        "global_id": "1sZ55UQj10Axc0aaOX_1WN",
+        "name": "Level 1"
+      }
+    },
+    {
+      "global_id": "1jSZalM0n1pQtgTzqZbtSz",
+      "name": "KZ1",
+      "ifc_type": "IfcColumn",
+      "description": null,
+      "properties": {
+        "AI_Design_Parameters": {
+          "Width": 500,
+          "Depth": 500,
+          "Height": 4000
+        }
+      },
+      "materials": [
+        "C40"
+      ],
+      "storey": {
+        "global_id": "1sZ55UQj10Axc0aaOX_1WN",
+        "name": "Level 1"
+      }
+    },
+    {
+      "global_id": "3VXV7Vx6b82A_8061VYGRr",
+      "name": "KZ2",
+      "ifc_type": "IfcColumn",
+      "description": null,
+      "properties": {
+        "AI_Design_Parameters": {
+          "Width": 500,
+          "Depth": 500,
+          "Height": 4000
+        }
+      },
+      "materials": [
+        "C40"
+      ],
+      "storey": {
+        "global_id": "1sZ55UQj10Axc0aaOX_1WN",
+        "name": "Level 1"
+      }
+    },
+    {
+      "global_id": "1l1waUg$bFnBS0ybX7fqye",
+      "name": "B1",
+      "ifc_type": "IfcSlab",
+      "description": null,
+      "properties": {
+        "AI_Design_Parameters": {
+          "Thickness": 150,
+          "Area": 36000
+        }
+      },
+      "materials": [
+        "C30"
+      ],
+      "storey": {
+        "global_id": "1sZ55UQj10Axc0aaOX_1WN",
+        "name": "Level 1"
+      }
+    }
+  ],
+  "summary": {
+    "total_elements": 4,
+    "by_type": {
+      "IfcBeam": 1,
+      "IfcColumn": 2,
+      "IfcSlab": 1
+    }
+  }
+}

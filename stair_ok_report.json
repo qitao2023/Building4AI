@@ -1,0 +1,11 @@
+{
+  "status": "ok",
+  "project": "办公楼楼梯间A-正确设计",
+  "output_file": "stair_ok.ifc",
+  "stair_global_id": "23VoNkiSL1SxyVUuExV2XC",
+  "elements_created": 6,
+  "rule_check": {
+    "passed": true,
+    "errors": []
+  }
+}

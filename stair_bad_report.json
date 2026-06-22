@@ -1,0 +1,60 @@
+{
+  "status": "needs_fix",
+  "project": "办公楼楼梯间B-有违规",
+  "output_file": "stair_bad.ifc",
+  "stair_global_id": "2QKpf1lt9BFPEil9Bn4dYN",
+  "elements_created": 3,
+  "rule_check": {
+    "passed": false,
+    "errors": [
+      {
+        "level": "error",
+        "rule": "stair_width",
+        "message": "楼梯宽度 1000mm < 最小要求 1100mm",
+        "fix": "增加楼梯宽度至少到 1100mm"
+      },
+      {
+        "level": "error",
+        "rule": "riser_max",
+        "location": "F1",
+        "message": "踏步高度 190mm > 最大允许 175mm",
+        "fix": "减小踏步高度至 175mm 以下，增加踏步数"
+      },
+      {
+        "level": "error",
+        "rule": "tread_min",
+        "location": "F1",
+        "message": "踏步深度 250mm < 最小要求 260mm",
+        "fix": "增加踏步深度至少到 260mm"
+      },
+      {
+        "level": "error",
+        "rule": "riser_max",
+        "location": "F2",
+        "message": "踏步高度 190mm > 最大允许 175mm",
+        "fix": "减小踏步高度至 175mm 以下，增加踏步数"
+      },
+      {
+        "level": "error",
+        "rule": "tread_min",
+        "location": "F2",
+        "message": "踏步深度 250mm < 最小要求 260mm",
+        "fix": "增加踏步深度至少到 260mm"
+      },
+      {
+        "level": "error",
+        "rule": "landing_depth",
+        "location": "L1",
+        "message": "平台深度 1000mm < 最小要求 1200mm",
+        "fix": "增加平台深度至少到 1200mm"
+      },
+      {
+        "level": "error",
+        "rule": "headroom",
+        "location": "L1",
+        "message": "中间平台净高 1180mm < 要求 2200mm (梁底标高 2700mm)",
+        "fix": "降低平台标高或提高梁底标高。当前梁底=2700mm, 平台顶=1520mm"
+      }
+    ]
+  }
+}

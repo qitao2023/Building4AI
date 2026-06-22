@@ -1,0 +1,11 @@
+{
+  "status": "ok",
+  "project": "办公楼楼梯间B-AI修正后",
+  "output_file": "stair_fixed.ifc",
+  "stair_global_id": "3QjzdIa6fEve06mepjyGi8",
+  "elements_created": 6,
+  "rule_check": {
+    "passed": true,
+    "errors": []
+  }
+}

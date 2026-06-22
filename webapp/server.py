@@ -244,6 +244,51 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
     return tmp.name
 
 # ═══════════════════════════════════ HTTP ══
+
+def _get_ifc_color(element):
+    """Extract RGB color from IFC material chain. Returns [r,g,b] or None."""
+    for assoc in getattr(element, 'HasAssociations', []) or []:
+        if not assoc.is_a('IfcRelAssociatesMaterial'): continue
+        mat_rel = assoc.RelatingMaterial
+        if not mat_rel: continue
+        if mat_rel.is_a('IfcMaterialLayerSetUsage'):
+            ls = mat_rel.ForLayerSet
+            if ls:
+                for layer in getattr(ls, 'MaterialLayers', []) or []:
+                    m = getattr(layer, 'Material', None)
+                    if m:
+                        c = _color_from_material(m)
+                        if c: return c
+        elif mat_rel.is_a('IfcMaterial'):
+            c = _color_from_material(mat_rel)
+            if c: return c
+    # Try type definition
+    for rel in getattr(element, 'IsDefinedBy', []) or []:
+        if rel.is_a('IfcRelDefinesByType') and rel.RelatingType:
+            c = _get_ifc_color(rel.RelatingType)
+            if c: return c
+    return None
+
+def _color_from_material(mat):
+    for rep in getattr(mat, 'HasRepresentation', []) or []:
+        if not rep.is_a('IfcMaterialDefinitionRepresentation'): continue
+        for r in getattr(rep, 'Representations', []) or []:
+            for item in getattr(r, 'Items', []) or []:
+                if not item.is_a('IfcStyledItem'): continue
+                for sa in getattr(item, 'Styles', []) or []:
+                    for style in getattr(sa, 'Styles', []) or []:
+                        if not style.is_a('IfcSurfaceStyle'): continue
+                        for ss in getattr(style, 'Styles', []) or []:
+                            if ss.is_a('IfcSurfaceStyleRendering'):
+                                c = ss.SurfaceColour
+                                if c:
+                                    r = getattr(c, 'Red', None)
+                                    g = getattr(c, 'Green', None)
+                                    b = getattr(c, 'Blue', None)
+                                    if r is not None:
+                                        return [int(r*255), int(g*255), int(b*255)]
+    return None
+
 class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin","*")
@@ -268,57 +313,131 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=="/api/generate-ifc": return self._gen_ifc()
         self._json({"error":"not found"},404)
 
+    _geom_cache = None  # class-level cache for geometry (cleared on new upload)
+
     def _geometry(self):
         global LAST_IFC
         if not LAST_IFC or not Path(LAST_IFC).exists():
             return self._json({"error":"No IFC uploaded yet"}, 400)
+        # ── Cache hit ──
+        cached = getattr(Handler, '_geom_cache', None)
+        if cached and cached.get('_file') == LAST_IFC:
+            return self._json(cached)
         try:
+            import ifcopenshell.geom as geom
             m = ifcopenshell.open(LAST_IFC)
+            settings = geom.settings()
             elements = []
+
+            # Build opening -> wall mapping
+            opening_to_wall = {}
+            has_openings = set()
+            for rel in m.by_type('IfcRelVoidsElement'):
+                try:
+                    w_gid = rel.RelatingBuildingElement.GlobalId
+                    o_gid = rel.RelatedOpeningElement.GlobalId
+                    opening_to_wall[o_gid] = w_gid
+                    has_openings.add(w_gid)
+                except: pass
+
             for e in m:
                 t = e.is_a()
-                if t not in ('IfcColumn','IfcBeam','IfcSlab','IfcWall','IfcStair','IfcStairFlight','IfcRailing'):
+                if not any(e.is_a(bt) for bt in (
+                    'IfcColumn','IfcBeam','IfcSlab','IfcWall','IfcStair','IfcStairFlight',
+                    'IfcRailing','IfcOpeningElement')):
                     continue
-                info = {"global_id":e.GlobalId,"name":e.Name or "","type":t,"pos":[0,0,0],"size":[200,200,3000]}
-                # Get placement
-                op = getattr(e, "ObjectPlacement", None)
-                if op and hasattr(op,"RelativePlacement") and hasattr(op.RelativePlacement,"Location"):
-                    lc = op.RelativePlacement.Location
-                    cs = lc.Coordinates if hasattr(lc,'Coordinates') else lc
-                    try: info["pos"] = [float(cs[0]),float(cs[1]),float(cs[2])]
-                    except: pass
-                # Get geometry size from extrusion
-                rep = getattr(e, "Representation", None)
-                if rep:
-                    for r in getattr(rep, "Representations", []) or []:
-                        for item in getattr(r, "Items", []) or []:
-                            if item.is_a('IfcExtrudedAreaSolid'):
-                                area = item.SweptArea
-                                if hasattr(area,'XDim') and hasattr(area,'YDim'):
-                                    info["size"] = [float(area.XDim), float(area.YDim), float(item.Depth)]
-                # Get size from property sets if no extrusion found
-                if info["size"] == [200,200,3000]:
-                    for rel in getattr(e,"IsDefinedBy",[]) or []:
-                        if not rel.is_a("IfcRelDefinesByProperties"): continue
-                        ps = rel.RelatingPropertyDefinition
-                        if not ps: continue
-                        props = {}
-                        for p in getattr(ps,"HasProperties",[]) or []:
-                            if hasattr(p,"NominalValue") and p.NominalValue:
-                                props[p.Name] = p.NominalValue.wrappedValue if hasattr(p.NominalValue,'wrappedValue') else p.NominalValue
-                        w = props.get("Width") or props.get("width") or 200
-                        d = props.get("Depth") or props.get("depth") or 200
-                        l = props.get("Length") or props.get("length") or 3000
-                        info["size"] = [float(w),float(d),float(l)]
+
+                info = {"global_id": e.GlobalId, "name": e.Name or "", "type": t}
+                # Normalize type name for rendering: IfcWallStandardCase -> IfcWall
+                for bt in ('IfcWall', 'IfcBeam', 'IfcColumn', 'IfcSlab', 'IfcStair', 'IfcStairFlight', 'IfcRailing', 'IfcOpeningElement'):
+                    if e.is_a(bt):
+                        info["type"] = bt
+                        break
+                # Extract IFC material color
+                try:
+                    c = _get_ifc_color(e)
+                    if c: info["color"] = c
+                except: pass
+
+                # Use ifcopenshell.geom for authoritative world-space geometry
+                shape = geom.create_shape(settings, e)
+                if 1:
+                        verts = list(shape.geometry.verts)
+                        m4 = shape.transformation.matrix
+                        xs, ys, zs = [], [], []
+                        for i in range(0, len(verts), 3):
+                            lx, ly, lz = verts[i], verts[i+1], verts[i+2]
+                            wx = m4[0]*lx + m4[4]*ly + m4[8]*lz  + m4[12]
+                            wy = m4[1]*lx + m4[5]*ly + m4[9]*lz  + m4[13]
+                            wz = m4[2]*lx + m4[6]*ly + m4[10]*lz + m4[14]
+                            xs.append(wx); ys.append(wy); zs.append(wz)
+
+                        sx_w = round((max(xs) - min(xs)) * 1000)
+                        sy_w = round((max(ys) - min(ys)) * 1000)
+                        sz_w = round((max(zs) - min(zs)) * 1000)
+                        cx_w = round((min(xs) + max(xs)) / 2 * 1000)
+                        cy_w = round((min(ys) + max(ys)) / 2 * 1000)
+                        cz_min = round(min(zs) * 1000)
+                        cz_max = round(max(zs) * 1000)
+
+                        if info["type"] == 'IfcColumn':
+                            spans = [(sx_w, min(xs)*1000, max(xs)*1000),
+                                     (sy_w, min(ys)*1000, max(ys)*1000),
+                                     (sz_w, cz_min, cz_max)]
+                            spans.sort(key=lambda x: x[0], reverse=True)
+                            height, bot, top = spans[0]
+                            info["size"] = [spans[1][0], spans[2][0], height]
+                            info["pos"] = [cx_w, cy_w, round(bot)]
+                        elif info["type"] in ('IfcBeam', 'IfcWall'):
+                            if sx_w >= sy_w:
+                                info["dir"] = "x"
+                                info["size"] = [sy_w, sz_w, sx_w]
+                            else:
+                                info["dir"] = "y"
+                                info["size"] = [sx_w, sz_w, sy_w]
+                            info["pos"] = [cx_w, cy_w, cz_min]
+                            if info["type"] == 'IfcBeam':
+                                w, d, l = info["size"]
+                                info["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', info["name"])
+                                info["name"] = re.sub(r':\d+$', '', info["name"])
+                        elif info["type"] == 'IfcOpeningElement':
+                            sp = sorted([sx_w, sy_w, sz_w])
+                            info["size"] = [sp[0], sp[2], sp[1]]
+                            info["dir"] = "x" if sx_w >= sy_w else "y"
+                            info["pos"] = [cx_w, cy_w, cz_min]
+                            info["parent_wall"] = opening_to_wall.get(e.GlobalId)
+                        elif info["type"] == 'IfcSlab':
+                            info["pos"] = [cx_w, cy_w, cz_min]
+                            info["size"] = [sx_w, sy_w, max(sz_w, 150)]
+                        else:
+                            info["pos"] = [cx_w, cy_w, cz_min]
+                            info["size"] = [sx_w, sy_w, sz_w]
+
                 elements.append(info)
 
             ctx = extract_ifc_context(LAST_IFC)
-            s = ctx["storeys"][0] if ctx["storeys"] else {"name":"F1"}
+            s = ctx["storeys"][0] if ctx["storeys"] else {"name": "F1"}
             fh = ctx["floor_heights"].get(s["name"], 4500)
-            return self._json({"elements":elements,"floorHeight":fh,
-                "summary":f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])}"})
+            result = {"elements": elements, "floorHeight": fh,
+                "summary": f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])} 墙:{len(ctx['walls'])}",
+                "_file": LAST_IFC}
+            Handler._geom_cache = result
+            return self._json(result)
         except Exception as e:
-            return self._json({"error":str(e)},500)
+            import traceback; traceback.print_exc()
+            return self._json({"error": str(e)}, 500)
+
+    def _read_json(self):
+        """Read JSON body with proper encoding detection."""
+        cl = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(cl)
+        for enc in ['utf-8', 'gbk', 'latin-1']:
+            try:
+                body = raw.decode(enc)
+                return json.loads(body)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+        return json.loads(raw.decode('utf-8', errors='replace'))
 
     def _parse_multipart(self):
         ct = self.headers.get("Content-Type","")
@@ -348,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
             tmp.write(data); tp = tmp.name
         if LAST_IFC and Path(LAST_IFC).exists(): Path(LAST_IFC).unlink(missing_ok=True)
         LAST_IFC = tp
+        Handler._geom_cache = None  # clear geometry cache on new upload
         try:
             ctx = extract_ifc_context(tp)
             s = ctx["storeys"][0] if ctx["storeys"] else {"name":"F1","elevation":0}
@@ -366,8 +486,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error":str(e)},500)
 
     def _design(self):
-        cl = int(self.headers.get("Content-Length",0))
-        body = json.loads(self.rfile.read(cl))
+        body = self._read_json()
         props = body.get("stairwell",{})
         sw = {"length_mm":props.get("length_mm",6000),"width_mm":props.get("width_mm",2700),
               "floor_height_mm":props.get("floor_height_mm",4500),
@@ -391,8 +510,7 @@ class Handler(BaseHTTPRequestHandler):
         global LAST_IFC
         if not LAST_IFC or not Path(LAST_IFC).exists():
             return self._json({"error":"请先上传IFC文件"},400)
-        cl = int(self.headers.get("Content-Length",0))
-        body = json.loads(self.rfile.read(cl))
+        body = self._read_json()
         flights = body.get("flights",[]); landings = body.get("landings",[])
         sw = body.get("stairwell",{})
         sw_mm = body.get("width_mm",1200)
@@ -406,5 +524,5 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error":str(e)},500)
 
 if __name__ == "__main__":
-    print(f"StructureAI v0.4 → http://localhost:{PORT}")
+    print(f"StructureAI v0.5 → http://localhost:{PORT}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
