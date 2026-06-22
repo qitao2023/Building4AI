@@ -13,6 +13,7 @@ from ifcopenshell.api import run
 
 PORT = 8765
 LAST_IFC = None  # stored uploaded IFC path
+LAST_STAIR_DESIGN = None  # {flights, landings, stairwell, sw_mm, well_w} for 3D overlay
 
 # ═══════════════════════════════════ IFC Analysis ══
 def extract_ifc_context(fp):
@@ -150,11 +151,19 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
 
     stair = run("root.create_entity", model, ifc_class="IfcStair", name="AI楼梯")
     run("spatial.assign_container", model, products=[stair], relating_structure=sty)
+    # IfcStair needs its own placement (even if identity)
+    stair.ObjectPlacement = model.create_entity('IfcLocalPlacement',
+        PlacementRelTo=sty.ObjectPlacement,
+        RelativePlacement=model.create_entity('IfcAxis2Placement3D',
+            Location=model.create_entity('IfcCartesianPoint', Coordinates=[0.,0.,0.]),
+            Axis=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]),
+            RefDirection=model.create_entity('IfcDirection', DirectionRatios=[1.,0.,0.])))
 
-    # Geometric context
+    # Geometric context — use main context, NOT SubContext (viewer compatibility)
     proj = model.by_type("IfcProject")[0]
     if not getattr(proj, "RepresentationContexts", None):
-        gctx = model.create_entity('IfcGeometricRepresentationContext', ContextType='Model',
+        gctx = model.create_entity('IfcGeometricRepresentationContext',
+            ContextType='Model', ContextIdentifier='Body',
             CoordinateSpaceDimension=3, Precision=0.001,
             WorldCoordinateSystem=model.create_entity('IfcAxis2Placement3D',
                 Location=model.create_entity('IfcCartesianPoint', Coordinates=[0.,0.,0.]),
@@ -163,11 +172,20 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
         proj.RepresentationContexts = [gctx]
     else:
         gctx = proj.RepresentationContexts[0]
-    gsub = model.create_entity('IfcGeometricRepresentationSubContext',
-        ContextType='Body', ContextIdentifier='Body', ParentContext=gctx)
+
+    # Ensure storey has ObjectPlacement and CompositionType
+    if not sty.ObjectPlacement:
+        sty.ObjectPlacement = model.create_entity('IfcLocalPlacement',
+            RelativePlacement=model.create_entity('IfcAxis2Placement3D',
+                Location=model.create_entity('IfcCartesianPoint', Coordinates=[0.,0.,0.]),
+                Axis=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]),
+                RefDirection=model.create_entity('IfcDirection', DirectionRatios=[1.,0.,0.])))
+    if not getattr(sty, 'CompositionType', None):
+        sty.CompositionType = 'ELEMENT'
 
     def mk_place(e, x, y, z):
         e.ObjectPlacement = model.create_entity('IfcLocalPlacement',
+            PlacementRelTo=sty.ObjectPlacement,
             RelativePlacement=model.create_entity('IfcAxis2Placement3D',
                 Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(x),float(y),float(z)]),
                 Axis=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]),
@@ -176,10 +194,11 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
     def add_geom(e, w, d, l, ox=0, oy=0, oz=0):
         r = model.create_entity('IfcRectangleProfileDef', ProfileType='AREA', XDim=float(w), YDim=float(d))
         s = model.create_entity('IfcExtrudedAreaSolid', SweptArea=r,
-            Position=model.create_entity('IfcAxis2Placement3D', Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(ox),float(oy),float(oz)])),
+            Position=model.create_entity('IfcAxis2Placement3D',
+                Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(ox),float(oy),float(oz)])),
             ExtrudedDirection=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]), Depth=float(l))
         e.Representation = model.create_entity('IfcProductDefinitionShape',
-            Representations=[model.create_entity('IfcShapeRepresentation', ContextOfItems=gsub,
+            Representations=[model.create_entity('IfcShapeRepresentation', ContextOfItems=gctx,
                 RepresentationIdentifier='Body', RepresentationType='SweptSolid', Items=[s])])
 
     f1 = flights_data[0] if flights_data else {}
@@ -193,11 +212,14 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
     y0 = (well_w_mm - sw_mm) // 2
     sy2 = y0 - sw_mm//2  # left edge of stair
 
+    # Collect all new elements for batch spatial containment
+    _stair_elements = []
+
     # Landings
     for ld in landings_data:
         slab = run("root.create_entity", model, ifc_class="IfcSlab", name=ld.get("name","Landing"))
         run("aggregate.assign_object", model, products=[slab], relating_object=stair)
-        run("spatial.assign_container", model, products=[slab], relating_structure=sty)
+        _stair_elements.append(slab)
         ll=ld.get("l",1200); lw=ld.get("w",2700); lt=ld.get("t",150); el=ld.get("el",0)
         x_off = x0 if "楼层" in ld.get("name","") else x0 + fl1
         mk_place(slab, x_off, y0 - lw//2, el)
@@ -209,6 +231,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
         for s in range(n):
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F1')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
+            _stair_elements.append(step)
             mk_place(step, x0 + s*td, sy2, s*rh)
             add_geom(step, td, sw_mm, rh)
 
@@ -219,6 +242,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
         for s in range(n):
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F2')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
+            _stair_elements.append(step)
             mk_place(step, x0 + sx-(s+1)*td, sy2, mid_el+s*rh)
             add_geom(step, td, sw_mm, rh)
 
@@ -232,16 +256,105 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
                 px=sx+xdir*min(si,n-1)*td+xdir*td//2; pz=sz+min(si,n-1)*rh_s
                 post=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Post_{fi}_{side}_{si}")
                 run("aggregate.assign_object",model,products=[post],relating_object=stair)
+                _stair_elements.append(post)
                 mk_place(post,px-20,sy-20,pz); add_geom(post,40,40,900)
             fp=sx+xdir*td//2; lp=sx+xdir*(n-1)*td+xdir*td//2
             rail=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Rail_{fi}_{side}")
             run("aggregate.assign_object",model,products=[rail],relating_object=stair)
+            _stair_elements.append(rail)
             mk_place(rail,min(fp,lp),sy-20,sz+(n//2)*rh_s+900)
             add_geom(rail,abs(lp-fp)+40,40,40)
+
+    # Batch spatial containment: all stair elements belong to the storey
+    if _stair_elements:
+        run("spatial.assign_container", model, products=_stair_elements, relating_structure=sty)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".ifc", delete=False)
     model.write(tmp.name); tmp.close()
     return tmp.name
+
+# ═══════════════════════════ Stair 3D Mesh (additive overlay) ══
+def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
+    """Generate 3D stair mesh elements directly from design params.
+    Returns list of elements in the same format as _geometry() output — additive overlay.
+    All units in mm. No IFC round-trip needed for visualization."""
+    elements = []
+    f1 = flights[0] if flights else {}
+    f2 = flights[1] if len(flights) > 1 else {}
+    fl1 = f1.get("len", 2800)
+    fh1 = f1.get("h", 1500)
+    ll_val = landings[0].get("l", 1200) if landings else 1200
+
+    col_half = 250
+    x0 = col_half
+    y0 = (well_w_mm - sw_mm) // 2  # left margin / center of stair in Y
+
+    # ── Landings (full stairwell width) ──
+    for ld in landings:
+        ll = ld.get("l", 1200)
+        lw = ld.get("w", well_w_mm)
+        lt = ld.get("t", 150)
+        el = ld.get("el", 0)
+        is_floor = "楼层" in ld.get("name", "")
+        x_off = x0 if is_floor else x0 + fl1
+        elements.append({
+            "global_id": f"stair_landing_{ld.get('name','')}",
+            "name": ld.get("name", "Landing"),
+            "type": "IfcSlab",
+            "pos": [round(x_off + ll/2), round(y0), round(el)],
+            "size": [round(ll), round(lw), max(round(lt), 150)],
+            "color": "#aabbcc"
+        })
+
+    # ── Flight 1 steps ──
+    if flights:
+        f = flights[0]; n = f.get("n", 9); td = f.get("tread", 280); rh = f.get("riser", 150)
+        for s in range(n):
+            elements.append({
+                "global_id": f"stair_F1_s{s+1}",
+                "name": f"{f.get('name','F1')}_s{s+1}",
+                "type": "IfcStairFlight",
+                "pos": [round(x0 + s*td + td/2), round(y0), round(s*rh)],
+                "size": [round(td), round(sw_mm), round(rh)],
+                "color": "#c8d6e5"
+            })
+
+    # ── Flight 2 steps (reverse direction) ──
+    if len(flights) > 1:
+        f = flights[1]; n = f.get("n", 9); td = f.get("tread", 280); rh = f.get("riser", 150)
+        sx = fl1 + ll_val  # start X for flight 2 (after landing + mid-landing)
+        for s in range(n):
+            elements.append({
+                "global_id": f"stair_F2_s{s+1}",
+                "name": f"{f.get('name','F2')}_s{s+1}",
+                "type": "IfcStairFlight",
+                "pos": [round(x0 + sx - (s+1)*td + td/2), round(y0), round(fh1 + s*rh)],
+                "size": [round(td), round(sw_mm), round(rh)],
+                "color": "#d6e0f0"
+            })
+
+    # ── Railing posts (along both sides of flights) ──
+    for fi, f in enumerate(flights):
+        n = f.get("n", 9); td = f.get("tread", 280); rh_s = f.get("riser", 150)
+        if fi == 0:
+            sx_f, sz_f, xdir = x0, 0, 1
+        else:
+            sx_f, sz_f, xdir = x0 + fl1 + ll_val, fh1, -1
+        for side, sy_off in [("L", 50), ("R", sw_mm - 50)]:
+            for si in range(0, n + 1, 3):
+                step_idx = min(si, n - 1)
+                px = sx_f + xdir * step_idx * td + xdir * td // 2
+                pz = sz_f + step_idx * rh_s
+                elements.append({
+                    "global_id": f"stair_post_{fi}_{side}_{si}",
+                    "name": f"Post_F{fi+1}_{side}_{si}",
+                    "type": "IfcRailing",
+                    "pos": [round(px), round(y0 - sw_mm//2 + sy_off), round(pz)],
+                    "size": [40, 40, 900],
+                    "color": "#888888"
+                })
+
+    return elements
 
 # ═══════════════════════════════════ HTTP ══
 
@@ -316,12 +429,13 @@ class Handler(BaseHTTPRequestHandler):
     _geom_cache = None  # class-level cache for geometry (cleared on new upload)
 
     def _geometry(self):
-        global LAST_IFC
+        global LAST_IFC, LAST_STAIR_DESIGN
         if not LAST_IFC or not Path(LAST_IFC).exists():
             return self._json({"error":"No IFC uploaded yet"}, 400)
-        # ── Cache hit ──
+        # ── Cache key includes stair design to invalidate when design changes ──
+        stair_key = hash(json.dumps(LAST_STAIR_DESIGN, sort_keys=True)) if LAST_STAIR_DESIGN else None
         cached = getattr(Handler, '_geom_cache', None)
-        if cached and cached.get('_file') == LAST_IFC:
+        if cached and cached.get('_file') == LAST_IFC and cached.get('_stair_key') == stair_key:
             return self._json(cached)
         try:
             import ifcopenshell.geom as geom
@@ -360,7 +474,10 @@ class Handler(BaseHTTPRequestHandler):
                 except: pass
 
                 # Use ifcopenshell.geom for authoritative world-space geometry
-                shape = geom.create_shape(settings, e)
+                try:
+                    shape = geom.create_shape(settings, e)
+                except Exception:
+                    continue  # skip entities without valid geometry (data-only IFC)
                 if 1:
                         verts = list(shape.geometry.verts)
                         m4 = shape.transformation.matrix
@@ -415,12 +532,45 @@ class Handler(BaseHTTPRequestHandler):
 
                 elements.append(info)
 
+            # Clean names: strip trailing :number
+            for el in elements:
+                el["name"] = re.sub(r':\d+\s*$', '', el["name"])
+                if el["type"] == 'IfcBeam':
+                    w, d, _ = el["size"]
+                    el["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', el["name"])
+
             ctx = extract_ifc_context(LAST_IFC)
             s = ctx["storeys"][0] if ctx["storeys"] else {"name": "F1"}
             fh = ctx["floor_heights"].get(s["name"], 4500)
+            summary = f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])} 墙:{len(ctx['walls'])}"
+
+            # ── Additive overlay: append stair 3D mesh from design ──
+            if LAST_STAIR_DESIGN:
+                sd = LAST_STAIR_DESIGN
+                stair_els = build_stair_mesh_elements(
+                    sd["flights"], sd["landings"], sd["stairwell"],
+                    sd["sw_mm"], sd["well_w"])
+                elements.extend(stair_els)
+                # Collect stair design data for display
+                stair_info = {"flights": [], "landings": []}
+                for f in sd["flights"]:
+                    stair_info["flights"].append({
+                        "name": f.get("name",""), "steps": f.get("n",0),
+                        "riser": f.get("riser",0), "tread": f.get("tread",0),
+                        "length": f.get("len",0), "height": f.get("h",0)
+                    })
+                for l in sd["landings"]:
+                    stair_info["landings"].append({
+                        "name": l.get("name",""), "l": l.get("l",0),
+                        "w": l.get("w",0), "t": l.get("t",0), "el": l.get("el",0)
+                    })
+                summary += f" | 楼梯: {len(sd['flights'])}跑 {sum(f.get('n',0) for f in sd['flights'])}级"
+            else:
+                stair_info = None
+
             result = {"elements": elements, "floorHeight": fh,
-                "summary": f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])} 墙:{len(ctx['walls'])}",
-                "_file": LAST_IFC}
+                "summary": summary, "stairDesign": stair_info,
+                "_file": LAST_IFC, "_stair_key": stair_key}
             Handler._geom_cache = result
             return self._json(result)
         except Exception as e:
@@ -460,13 +610,14 @@ class Handler(BaseHTTPRequestHandler):
         return filename, data
 
     def _analyze(self):
-        global LAST_IFC
+        global LAST_IFC, LAST_STAIR_DESIGN
         filename, data = self._parse_multipart()
         if not data: return self._json({"error":"empty file"},400)
         with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
             tmp.write(data); tp = tmp.name
         if LAST_IFC and Path(LAST_IFC).exists(): Path(LAST_IFC).unlink(missing_ok=True)
         LAST_IFC = tp
+        LAST_STAIR_DESIGN = None  # clear stair design on new upload (re-upload resets)
         Handler._geom_cache = None  # clear geometry cache on new upload
         try:
             ctx = extract_ifc_context(tp)
@@ -507,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(result)
 
     def _gen_ifc(self):
-        global LAST_IFC
+        global LAST_IFC, LAST_STAIR_DESIGN
         if not LAST_IFC or not Path(LAST_IFC).exists():
             return self._json({"error":"请先上传IFC文件"},400)
         body = self._read_json()
@@ -516,9 +667,16 @@ class Handler(BaseHTTPRequestHandler):
         sw_mm = body.get("width_mm",1200)
         try:
             well_w = body.get("stairwell_width_mm", 2700)
+            # Generate IFC file (for download)
             tp = generate_stair_ifc(LAST_IFC, flights, landings, sw, sw_mm, well_w)
             self._file(tp)
             Path(tp).unlink(missing_ok=True)
+            # Store design for additive 3D overlay (no IFC merge needed for visualization)
+            LAST_STAIR_DESIGN = {
+                "flights": flights, "landings": landings,
+                "stairwell": sw, "sw_mm": sw_mm, "well_w": well_w
+            }
+            Handler._geom_cache = None  # invalidate geometry cache
         except Exception as e:
             import traceback; traceback.print_exc()
             self._json({"error":str(e)},500)

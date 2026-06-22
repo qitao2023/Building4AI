@@ -215,6 +215,25 @@ async function loadGeometry() {
   document.getElementById('file-info').innerHTML = `<span class="pill pill-green">✅ ${data.summary}</span>`;
   document.getElementById('select-section').style.display = 'block';
   document.getElementById('ai-section').style.display = 'block';
+  // Show stair design data if present (persisted from previous design)
+  if (data.stairDesign) {
+    const div = document.getElementById('design-result');
+    let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px;font-size:13px;">';
+    sdHtml += '<b>📐 已加载楼梯设计</b><br>';
+    if (data.stairDesign.flights) {
+      data.stairDesign.flights.forEach(f => {
+        sdHtml += `🏃 ${f.name}: ${f.steps}级 | 踏步${f.riser}×${f.tread}mm | 长${f.length}mm 高${f.height}mm<br>`;
+      });
+    }
+    if (data.stairDesign.landings) {
+      data.stairDesign.landings.forEach(l => {
+        sdHtml += `🪜 ${l.name}: ${l.l}×${l.w}×${l.t}mm | 标高${l.el}mm<br>`;
+      });
+    }
+    sdHtml += '</div>';
+    div.innerHTML = sdHtml;
+    document.getElementById('btn-download').style.display = 'block';
+  }
 }
 
 function addBox(cx, cy, cz, w, h, d, el) {
@@ -535,10 +554,29 @@ window.doDesign = async function() {
     // Also render stair geometry
     const sr = await fetch(API+'/api/generate-ifc', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...window._lastDesign, stairwell_width_mm:wid}) });
     if (sr.ok) {
-      // Load generated stair geometry
+      // Load generated stair geometry (additive overlay on original structure)
       const stairGeo = await fetch(API+'/api/geometry');
       const sg = await stairGeo.json();
-      if (!sg.error) renderGeometry(sg);
+      if (!sg.error) {
+        renderGeometry(sg);
+        // Show stair design data from server response
+        if (sg.stairDesign) {
+          let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;border-radius:6px;font-size:13px;">';
+          sdHtml += '<b>📐 楼梯设计数据 (已叠加至三维)</b><br>';
+          if (sg.stairDesign.flights) {
+            sg.stairDesign.flights.forEach(f => {
+              sdHtml += `🏃 ${f.name}: ${f.steps}级 | 踏步${f.riser}×${f.tread}mm | 长${f.length}mm 高${f.height}mm<br>`;
+            });
+          }
+          if (sg.stairDesign.landings) {
+            sg.stairDesign.landings.forEach(l => {
+              sdHtml += `🪜 ${l.name}: ${l.l}×${l.w}×${l.t}mm | 标高${l.el}mm<br>`;
+            });
+          }
+          sdHtml += '</div>';
+          div.innerHTML += sdHtml;
+        }
+      }
     }
   } catch(e) { st.textContent = '❌ '+e.message; }
   btn.disabled = false;
