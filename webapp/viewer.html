@@ -294,38 +294,126 @@ function renderGeometry(data) {
     const wStart = alongA === 'x' ? wb.xMin : wb.zMin;
     const wBot   = wb.yMin;
 
-    const shape = new THREE.Shape();
-    shape.moveTo(0, 0);
-    shape.lineTo(wLen, 0);
-    shape.lineTo(wLen, wH);
-    shape.lineTo(0, wH);
-    shape.closePath();
-
+    // Collect opening rectangles in wall-local coords, clamped to wall face
+    const holes = [];
     for (const op of wOps) {
-      const eps = 0.002;
       const opStart = alongA === 'x' ? op.xMin : op.zMin;
       const opLen   = alongA === 'x' ? op.w : op.d;
-      const opBot   = op.yMin;
-      const opH     = op.h;
-
-      let hx = opStart - wStart;
-      let hy = opBot - wBot;
-      let hw = opLen;
-      let hh = opH;
-      if (hy < eps) { hy = eps; hh -= eps; }
-      if (hy + hh > wH - eps) { hh = wH - eps - hy; }
-      if (hx < eps) { hx = eps; hw -= eps; }
-      if (hx + hw > wLen - eps) { hw = wLen - eps - hx; }
-      if (hw <= 0 || hh <= 0) continue;
-
-      const hole = new THREE.Path();
-      hole.moveTo(hx, hy);
-      hole.lineTo(hx + hw, hy);
-      hole.lineTo(hx + hw, hy + hh);
-      hole.lineTo(hx, hy + hh);
-      hole.closePath();
-      shape.holes.push(hole);
+      const hx = opStart - wStart;
+      const hy = op.yMin - wBot;
+      const hw = opLen;
+      const hh = op.h;
+      if (hx + hw <= 0.001 || hx >= wLen - 0.001 || hy + hh <= 0.001 || hy >= wH - 0.001) continue;
+      const chx = Math.max(0, hx);
+      const chy = Math.max(0, hy);
+      const chw = Math.min(hx + hw, wLen) - chx;
+      const chh = Math.min(hy + hh, wH) - chy;
+      if (chw <= 0.001 || chh <= 0.001) continue;
+      holes.push({ x: chx, y: chy, w: chw, h: chh });
     }
+
+    // Build polygon outline as ONE continuous path tracing around openings
+    const shape = new THREE.Shape();
+
+    // Collect all opening edges on each boundary
+    // Bottom openings: sort by X, merge overlapping
+    const bottomGaps = []; // {x1, x2} gaps in the bottom edge
+    const topGaps = [];
+    const leftGaps = [];   // {y1, y2} gaps in the left edge
+    const rightGaps = [];
+
+    for (const h of holes) {
+      if (h.y <= 0.001) bottomGaps.push({ x1: h.x, x2: h.x + h.w });
+      if (h.y + h.h >= wH - 0.001) topGaps.push({ x1: h.x, x2: h.x + h.w });
+      if (h.x <= 0.001) leftGaps.push({ y1: h.y, y2: h.y + h.h });
+      if (h.x + h.w >= wLen - 0.001) rightGaps.push({ y1: h.y, y2: h.y + h.h });
+    }
+
+    // Sort and merge overlapping gaps
+    const mergeGaps = (gaps, key1, key2) => {
+      if (gaps.length === 0) return [];
+      gaps.sort((a, b) => a[key1] - b[key1]);
+      const merged = [gaps[0]];
+      for (let i = 1; i < gaps.length; i++) {
+        const last = merged[merged.length - 1];
+        if (gaps[i][key1] <= last[key2] + 0.001) {
+          last[key2] = Math.max(last[key2], gaps[i][key2]);
+        } else {
+          merged.push(gaps[i]);
+        }
+      }
+      return merged;
+    };
+    const bGaps = mergeGaps(bottomGaps, 'x1', 'x2');
+    const tGaps = mergeGaps(topGaps, 'x1', 'x2');
+    const lGaps = mergeGaps(leftGaps, 'y1', 'y2');
+    const rGaps = mergeGaps(rightGaps, 'y1', 'y2');
+
+    // Draw ONE continuous polygon: start at bottom-left, go clockwise
+    let px = 0, py = 0;
+    shape.moveTo(px, py);
+
+    // Bottom edge: walk right, jumping over gaps
+    for (const g of bGaps) {
+      if (g.x1 > px + 0.001) { shape.lineTo(g.x1, 0); }
+      shape.lineTo(g.x1, 0);  // to gap start
+      // Go up to gap top, across, back down
+      const gapTop = Math.min(wH, ...holes.filter(h => h.y <= 0.001 && h.x >= g.x1 - 0.001 && h.x + h.w <= g.x2 + 0.001).map(h => h.y + h.h));
+      // Actually use the gap dimensions
+      const matchingHole = holes.find(h => Math.abs(h.x - g.x1) < 0.01 && Math.abs(h.x + h.w - g.x2) < 0.01 && h.y < 0.01);
+      const hTop = matchingHole ? matchingHole.y + matchingHole.h : wH;
+      shape.lineTo(g.x1, hTop);      // up left side of opening
+      shape.lineTo(g.x2, hTop);      // across top of opening
+      shape.lineTo(g.x2, 0);         // down right side of opening
+      px = g.x2;
+    }
+    if (px < wLen - 0.001) { shape.lineTo(wLen, 0); }
+
+    // Right edge: walk up, jumping over gaps
+    py = 0;
+    for (const g of rGaps) {
+      if (g.y1 > py + 0.001) { shape.lineTo(wLen, g.y1); }
+      const matchingHole = holes.find(h => Math.abs(h.y - g.y1) < 0.01 && Math.abs(h.y + h.h - g.y2) < 0.01 && h.x + h.w > wLen - 0.01);
+      const hRight = matchingHole ? matchingHole.x : 0;
+      shape.lineTo(wLen, g.y1);
+      shape.lineTo(hRight, g.y1);     // left across top of opening? No, across bottom
+      shape.lineTo(hRight, g.y2);     // up
+      shape.lineTo(wLen, g.y2);       // right
+      py = g.y2;
+    }
+    if (py < wH - 0.001) { shape.lineTo(wLen, wH); }
+
+    // Top edge: walk left, jumping over gaps (reversed)
+    px = wLen;
+    for (let i = tGaps.length - 1; i >= 0; i--) {
+      const g = tGaps[i];
+      if (g.x2 < px - 0.001) { shape.lineTo(g.x2, wH); }
+      const matchingHole = holes.find(h => Math.abs(h.x - g.x1) < 0.01 && Math.abs(h.x + h.w - g.x2) < 0.01 && h.y + h.h > wH - 0.01);
+      const hBot = matchingHole ? matchingHole.y : 0;
+      shape.lineTo(g.x2, wH);
+      shape.lineTo(g.x2, hBot);       // down
+      shape.lineTo(g.x1, hBot);       // left
+      shape.lineTo(g.x1, wH);         // up
+      px = g.x1;
+    }
+    if (px > 0.001) { shape.lineTo(0, wH); }
+
+    // Left edge: walk down, jumping over gaps (reversed)
+    py = wH;
+    for (let i = lGaps.length - 1; i >= 0; i--) {
+      const g = lGaps[i];
+      if (g.y2 < py - 0.001) { shape.lineTo(0, g.y2); }
+      const matchingHole = holes.find(h => Math.abs(h.y - g.y1) < 0.01 && Math.abs(h.y + h.h - g.y2) < 0.01 && h.x < 0.01);
+      const hRight = matchingHole ? matchingHole.x + matchingHole.w : wLen;
+      shape.lineTo(0, g.y2);
+      shape.lineTo(hRight, g.y2);     // right
+      shape.lineTo(hRight, g.y1);     // down
+      shape.lineTo(0, g.y1);          // left
+      py = g.y1;
+    }
+    if (py > 0.001) { shape.lineTo(0, 0); }
+
+    shape.closePath();
 
     const geo = new THREE.ExtrudeGeometry(shape, { steps: 1, depth: wThick, bevelEnabled: false });
     const mat = mats[wb.el.type] || mats.IfcSlab;
