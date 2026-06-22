@@ -126,9 +126,9 @@ renderer.toneMappingExposure = 1.2;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a2230);
-scene.fog = new THREE.Fog(0x1a2230, 30, 120);
+// fog removed — model shrinks to a point instead of disappearing
 
-const camera = new THREE.PerspectiveCamera(50, 2, 0.5, 200);
+const camera = new THREE.PerspectiveCamera(50, 2, 0.1, 5000);
 camera.position.set(12, 10, 12);
 camera.lookAt(3, 2, 1.3);
 
