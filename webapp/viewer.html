@@ -886,11 +886,13 @@ document.addEventListener('keydown', (e) => {
 async function addStairToScene() {
   const resp = await fetch(API + '/api/stair-overlay');
   const data = await resp.json();
+  console.log('addStairToScene:', data.elements ? data.elements.length : 0, 'elements');
   if (!data.elements || !data.elements.length) return;
   for (const el of data.elements) {
     const b = getBox(el);
     addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
   }
+  console.log('addStairToScene done — modelGroup now has', modelGroup.children.length, 'children');
 }
 
 // ── Design ──
