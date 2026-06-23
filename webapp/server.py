@@ -329,69 +329,89 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
     fl1 = f1.get("len", 4200); fh1 = f1.get("h", 2250)
     ll_val = landings_data[0].get("l", 1200) if landings_data else 1200
     mid_el = fh1; H = stairwell.get("floor_height_mm", 4500)
-    # Center stair in stairwell interior (account for 500mm columns)
-    col_half = 250  # half column width
-    x0 = col_half  # start after left column
-    y_margin = (well_w_mm - sw_mm) // 2  # left margin for centering stair in well
-    # Step left edge = y_margin, step center = well_w_mm/2
 
-    # Absolute position of stairwell in the building (from user's box-select)
-    origin_x = stairwell.get("origin_x", 0)
-    origin_y = stairwell.get("origin_y", 0)
-    ox = origin_x; oy = origin_y
+    # ── Direction & coordinate system ──
+    length_mm = stairwell.get("length_mm", 6000)
+    width_mm  = stairwell.get("width_mm", 2700)
+    along_z = width_mm > length_mm  # True = stair runs along IFC Y
+
+    ox = stairwell.get("origin_x", 0)
+    oy = stairwell.get("origin_y", 0)
+    storey_elev = stairwell.get("storey_elevation", 0)
+
+    col_half = 250
+    along0 = col_half
+
+    if along_z:
+        ac_span, al_span = length_mm, width_mm
+        def ics(e, along, across, z):
+            mk_place(e, ox+across, oy+along, storey_elev+z)
+        def igm(e, along_d, across_d, z_d):
+            add_geom(e, across_d, along_d, z_d)
+    else:
+        ac_span, al_span = width_mm, length_mm
+        def ics(e, along, across, z):
+            mk_place(e, ox+along, oy+across, storey_elev+z)
+        def igm(e, along_d, across_d, z_d):
+            add_geom(e, along_d, across_d, z_d)
+
+    ac_margin = (ac_span - sw_mm) // 2
 
     # Collect all new elements for batch spatial containment
     _stair_elements = []
 
-    # Landings — fill entire stairwell width, starting from Y=0
+    # Landings
     for ld in landings_data:
         slab = run("root.create_entity", model, ifc_class="IfcSlab", name=ld.get("name","Landing"))
         run("aggregate.assign_object", model, products=[slab], relating_object=stair)
         _stair_elements.append(slab)
         ll=ld.get("l",1200); lw=ld.get("w",well_w_mm); lt=ld.get("t",150); el=ld.get("el",0)
-        x_off = x0 if "楼层" in ld.get("name","") else x0 + fl1
-        mk_place(slab, ox + x_off, oy, el)
-        add_geom(slab, ll, lw, lt)
+        along_off = along0 if "楼层" in ld.get("name","") else along0 + fl1
+        ics(slab, along_off, ac_margin, el)
+        igm(slab, ll, ac_span, lt)
 
-    # Flight 1 steps
+    # Flight 1
     if flights_data:
         f = flights_data[0]; n=f.get("n",10); td=f.get("tread",280); rh=f.get("riser",150)
         for s in range(n):
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F1')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
             _stair_elements.append(step)
-            mk_place(step, ox + x0 + s*td, oy + y_margin, s*rh)
-            add_geom(step, td, sw_mm, rh)
+            ics(step, along0 + s*td, ac_margin, s*rh)
+            igm(step, td, sw_mm, rh)
 
-    # Flight 2 steps
+    # Flight 2
     if len(flights_data) > 1:
         f = flights_data[1]; n=f.get("n",10); td=f.get("tread",280); rh=f.get("riser",150)
-        sx = fl1 + ll_val
+        along_start2 = fl1 + ll_val
         for s in range(n):
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F2')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
             _stair_elements.append(step)
-            mk_place(step, ox + x0 + sx-(s+1)*td, oy + y_margin, mid_el+s*rh)
-            add_geom(step, td, sw_mm, rh)
+            ics(step, along0 + along_start2 - (s+1)*td, ac_margin, mid_el+s*rh)
+            igm(step, td, sw_mm, rh)
 
     # Railings
     for fi, f in enumerate(flights_data):
         n=f.get("n",10); td=f.get("tread",280); rh_s=f.get("riser",150)
-        if fi==0: sx,sz,xdir = x0,0,1
-        else: sx,sz,xdir = x0+fl1+ll_val,mid_el,-1
-        for side, sy in [("L",y_margin+50),("R",y_margin+sw_mm-50)]:
+        if fi==0: al_start, z_start, al_dir = along0, 0, 1
+        else:     al_start, z_start, al_dir = along0+fl1+ll_val, mid_el, -1
+        for side, ac_off in [("L",ac_margin+50),("R",ac_margin+sw_mm-50)]:
             for si in range(0,n+1,3):
-                px=sx+xdir*min(si,n-1)*td+xdir*td//2; pz=sz+min(si,n-1)*rh_s
+                step_idx = min(si,n-1)
+                p_al = al_start + al_dir*step_idx*td + al_dir*td//2
+                pz   = z_start + step_idx*rh_s
                 post=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Post_{fi}_{side}_{si}")
                 run("aggregate.assign_object",model,products=[post],relating_object=stair)
                 _stair_elements.append(post)
-                mk_place(post,ox+px-20,oy+sy-20,pz); add_geom(post,40,40,900)
-            fp=sx+xdir*td//2; lp=sx+xdir*(n-1)*td+xdir*td//2
+                ics(post, p_al-20, ac_off-20, pz); igm(post, 40, 40, 900)
+            fp = al_start + al_dir*td//2
+            lp = al_start + al_dir*(n-1)*td + al_dir*td//2
             rail=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Rail_{fi}_{side}")
             run("aggregate.assign_object",model,products=[rail],relating_object=stair)
             _stair_elements.append(rail)
-            mk_place(rail,ox+min(fp,lp),oy+sy-20,sz+(n//2)*rh_s+900)
-            add_geom(rail,abs(lp-fp)+40,40,40)
+            ics(rail, min(fp,lp), ac_off-20, z_start+(n//2)*rh_s+900)
+            igm(rail, abs(lp-fp)+40, 40, 40)
 
     # Batch spatial containment: all stair elements belong to the storey
     if _stair_elements:
@@ -413,35 +433,56 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
     fh1 = f1.get("h", 1500)
     ll_val = landings[0].get("l", 1200) if landings else 1200
 
+    # ── Direction & coordinate system ──
+    # Stair runs along the longer side of the stairwell
+    length_mm = stairwell.get("length_mm", 6000)
+    width_mm  = stairwell.get("width_mm", 2700)
+    along_z = width_mm > length_mm  # True = stair runs along IFC Y (world Z)
+
+    # Absolute position & storey elevation
+    ox = stairwell.get("origin_x", 0)
+    oy = stairwell.get("origin_y", 0)
+    storey_elev = stairwell.get("storey_elevation", 0)
+
     col_half = 250
-    x0 = col_half
-    # Stair centered in stairwell: margin on each side
-    y_margin = (well_w_mm - sw_mm) // 2
-    y_center = well_w_mm // 2  # center of stairwell = center of stair
+    along0 = col_half  # start offset from stairwell edge along flight
 
-    # Absolute position of stairwell in the building (from user's box-select)
-    origin_x = stairwell.get("origin_x", 0)
-    origin_y = stairwell.get("origin_y", 0)
-    ox = origin_x; oy = origin_y
+    # Axis mapping helpers — swap X↔Y when stair runs along Z (IFC Y)
+    if along_z:
+        ac_span = length_mm       # across span = X (shorter side)
+        al_span = width_mm        # along span  = Y (longer side)
+        def mkpos(along, across, z):
+            return [round(ox + across), round(oy + along), round(storey_elev + z)]
+        def mksize(along_dim, across_dim, z_dim):
+            return [round(across_dim), round(along_dim), round(z_dim)]
+    else:
+        ac_span = width_mm        # across span = Y
+        al_span = length_mm       # along span  = X
+        def mkpos(along, across, z):
+            return [round(ox + along), round(oy + across), round(storey_elev + z)]
+        def mksize(along_dim, across_dim, z_dim):
+            return [round(along_dim), round(across_dim), round(z_dim)]
 
-    # ── Landings (fill full stairwell width, start at Y=0) ──
+    ac_margin = (ac_span - sw_mm) // 2
+    ac_center = ac_span // 2
+
+    # ── Landings ──
     for ld in landings:
         ll = ld.get("l", 1200)
-        lw = well_w_mm  # always full stairwell width
         lt = ld.get("t", 150)
         el = ld.get("el", 0)
         is_floor = "楼层" in ld.get("name", "")
-        x_off = x0 if is_floor else x0 + fl1
+        along_off = along0 if is_floor else along0 + fl1
         elements.append({
             "global_id": f"stair_landing_{ld.get('name','')}",
             "name": ld.get("name", "Landing"),
             "type": "IfcSlab",
-            "pos": [round(ox + x_off + ll/2), round(oy + y_center), round(el)],
-            "size": [round(ll), round(lw), max(round(lt), 150)],
+            "pos": mkpos(along_off + ll/2, ac_center, el),
+            "size": mksize(ll, ac_span, max(lt, 150)),
             "color": "#aabbcc"
         })
 
-    # ── Flight 1 steps ──
+    # ── Flight 1 ──
     if flights:
         f = flights[0]; n = f.get("n", 9); td = f.get("tread", 280); rh = f.get("riser", 150)
         for s in range(n):
@@ -449,43 +490,43 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                 "global_id": f"stair_F1_s{s+1}",
                 "name": f"{f.get('name','F1')}_s{s+1}",
                 "type": "IfcStairFlight",
-                "pos": [round(ox + x0 + s*td + td/2), round(oy + y_center), round(s*rh)],
-                "size": [round(td), round(sw_mm), round(rh)],
+                "pos": mkpos(along0 + s*td + td/2, ac_center, s*rh),
+                "size": mksize(td, sw_mm, rh),
                 "color": "#c8d6e5"
             })
 
-    # ── Flight 2 steps (reverse direction) ──
+    # ── Flight 2 ──
     if len(flights) > 1:
         f = flights[1]; n = f.get("n", 9); td = f.get("tread", 280); rh = f.get("riser", 150)
-        sx = fl1 + ll_val  # start X for flight 2 (after landing + mid-landing)
+        along_start2 = fl1 + ll_val
         for s in range(n):
             elements.append({
                 "global_id": f"stair_F2_s{s+1}",
                 "name": f"{f.get('name','F2')}_s{s+1}",
                 "type": "IfcStairFlight",
-                "pos": [round(ox + x0 + sx - (s+1)*td + td/2), round(oy + y_center), round(fh1 + s*rh)],
-                "size": [round(td), round(sw_mm), round(rh)],
+                "pos": mkpos(along0 + along_start2 - (s+1)*td + td/2, ac_center, fh1 + s*rh),
+                "size": mksize(td, sw_mm, rh),
                 "color": "#d6e0f0"
             })
 
-    # ── Railing posts (along both sides of flights) ──
+    # ── Railing posts ──
     for fi, f in enumerate(flights):
         n = f.get("n", 9); td = f.get("tread", 280); rh_s = f.get("riser", 150)
         if fi == 0:
-            sx_f, sz_f, xdir = x0, 0, 1
+            al_start, z_start, al_dir = along0, 0, 1
         else:
-            sx_f, sz_f, xdir = x0 + fl1 + ll_val, fh1, -1
-        for side, sy_off in [("L", 50), ("R", sw_mm - 50)]:
+            al_start, z_start, al_dir = along0 + fl1 + ll_val, fh1, -1
+        for side, ac_off in [("L", 50), ("R", sw_mm - 50)]:
             for si in range(0, n + 1, 3):
                 step_idx = min(si, n - 1)
-                px = sx_f + xdir * step_idx * td + xdir * td // 2
-                pz = sz_f + step_idx * rh_s
+                p_al = al_start + al_dir * step_idx * td + al_dir * td // 2
+                pz   = z_start + step_idx * rh_s
                 elements.append({
                     "global_id": f"stair_post_{fi}_{side}_{si}",
                     "name": f"Post_F{fi+1}_{side}_{si}",
                     "type": "IfcRailing",
-                    "pos": [round(ox + px), round(oy + y_margin + sy_off), round(pz)],
-                    "size": [40, 40, 900],
+                    "pos": mkpos(p_al, ac_margin + ac_off, pz),
+                    "size": mksize(40, 40, 900),
                     "color": "#888888"
                 })
 
@@ -1011,6 +1052,12 @@ class Handler(BaseHTTPRequestHandler):
         sw_mm = body.get("width_mm",1200)
         try:
             well_w = body.get("stairwell_width_mm", 2700)
+            # Inject storey elevation from analysis context
+            if LAST_IFC_CONTEXT:
+                ss = LAST_IFC_CONTEXT.get("storeys", [])
+                sw["storey_elevation"] = ss[0]["elevation"] if ss else 0
+            else:
+                sw.setdefault("storey_elevation", 0)
             # Generate IFC file (for download)
             tp = generate_stair_ifc(LAST_IFC, flights, landings, sw, sw_mm, well_w)
             self._file(tp)
