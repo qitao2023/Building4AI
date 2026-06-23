@@ -412,11 +412,11 @@ function getBox(el) {
     let bw = sx / 1000, bh = sy / 1000, bl = sz / 1000;
     if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + bh / 2; cz = mz; }
     else             { w = bl; h = bh; d = bw; cx = mx; cy = my + bh / 2; cz = mz; }
-  } else if (el.type === 'IfcSlab') {
-    // Slab: flat horizontal. Size = [Xspan, Yspan, Zspan=thickness]
+  } else if (el.type === 'IfcSlab' || el.type === 'IfcStair' || el.type === 'IfcStairFlight' || el.type === 'IfcRailing') {
+    // Slab / Stair: flat horizontal. Size = [Xspan, Yspan, Zspan=thickness/height]
     w = sx / 1000;
     d = sy / 1000;
-    h = Math.max(sz / 1000, 0.12);
+    h = Math.max(sz / 1000, 0.05);
     cx = mx; cy = my + h / 2; cz = mz;
   } else {
     w = sx / 1000 || 0.3; h = sy / 1000 || 0.3; d = sz / 1000 || 0.3;
