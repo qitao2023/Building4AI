@@ -316,7 +316,9 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
         r = model.create_entity('IfcRectangleProfileDef', ProfileType='AREA', XDim=float(w), YDim=float(d))
         s = model.create_entity('IfcExtrudedAreaSolid', SweptArea=r,
             Position=model.create_entity('IfcAxis2Placement3D',
-                Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(ox),float(oy),float(oz)])),
+                Location=model.create_entity('IfcCartesianPoint', Coordinates=[float(ox),float(oy),float(oz)]),
+                Axis=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]),
+                RefDirection=model.create_entity('IfcDirection', DirectionRatios=[1.,0.,0.])),
             ExtrudedDirection=model.create_entity('IfcDirection', DirectionRatios=[0.,0.,1.]), Depth=float(l))
         e.Representation = model.create_entity('IfcProductDefinitionShape',
             Representations=[model.create_entity('IfcShapeRepresentation', ContextOfItems=gctx,
