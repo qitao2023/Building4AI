@@ -33,6 +33,14 @@ input:focus,select:focus { border-color:var(--blue); }
 .section-title { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
 .hint { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.8); color:#fff; padding:8px 18px; border-radius:20px; font-size:13px; pointer-events:none; z-index:10; }
 #status { font-size:12px; color:var(--amber); margin-top:8px; text-align:center; min-height:18px; }
+/* Progress bar for IFC loading */
+.progress-container { margin-top:8px; display:none; }
+.progress-header { display:flex; justify-content:space-between; font-size:11px; margin-bottom:4px; }
+.progress-phase { color:var(--text); }
+.progress-count { color:var(--text2); font-family:monospace; }
+.progress-track { background:var(--border); border-radius:4px; height:6px; overflow:hidden; }
+.progress-fill { background:linear-gradient(90deg,#3b82f6,#10b981); height:100%; width:0%; border-radius:4px; transition:width 0.3s ease; }
+.progress-file { font-size:11px; color:var(--text2); margin-top:4px; }
 /* Component panel — right side floating card */
 #component-panel { position:absolute; bottom:56px; right:16px; width:260px; max-height:50vh; background:rgba(17,22,32,0.94); border:1px solid var(--border); border-radius:12px; padding:16px; z-index:20; backdrop-filter:blur(8px); box-shadow:0 8px 32px rgba(0,0,0,0.5); overflow-y:auto; display:none; }
 #component-panel .section-title { margin-bottom:10px; }
@@ -52,6 +60,14 @@ input:focus,select:focus { border-color:var(--blue); }
     <button class="btn btn-outline btn-sm" onclick="document.getElementById('fu').click()" style="width:100%">选择 IFC 文件...</button>
     <input type="file" id="fu" accept=".ifc" style="display:none">
     <div id="file-info" style="font-size:12px;color:var(--text2);margin-top:6px"></div>
+    <div class="progress-container" id="load-progress">
+      <div class="progress-header">
+        <span class="progress-phase" id="progress-phase">准备中...</span>
+        <span class="progress-count" id="progress-count">0 / 0</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="progress-bar"></div></div>
+      <div class="progress-file" id="progress-file"></div>
+    </div>
   </div>
 
   <div class="section" id="select-section" style="display:none">
@@ -168,7 +184,7 @@ const mats = {
   IfcStair: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcStairFlight: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcRailing: new THREE.MeshStandardMaterial({color:0x666666, roughness:0.4, metalness:0.3}),
-  select: new THREE.MeshStandardMaterial({color:0x00ff88, roughness:0.3, emissive:0x00ff44, emissiveIntensity:0.5, transparent:true, opacity:0.6}),
+  select: new THREE.MeshStandardMaterial({color:0x5599cc, roughness:0.3, emissive:0x335577, emissiveIntensity:0.2, transparent:true, opacity:0.5}),
 };
 
 // ── Post Processing ──
@@ -183,19 +199,19 @@ ssaoPass.output = SSAOPass.OUTPUT.Default;
 composer.addPass(ssaoPass);
 
 const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.15, 0.4, 0.85
+  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.12, 0.4, 0.85
 );
 composer.addPass(bloomPass);
 
 const outlinePass = new OutlinePass(
   new THREE.Vector2(window.innerWidth, window.innerHeight), scene, camera
 );
-outlinePass.edgeStrength = 4;
-outlinePass.edgeGlow = 1.5;
-outlinePass.edgeThickness = 1;
+outlinePass.edgeStrength = 6;
+outlinePass.edgeGlow = 0.1;
+outlinePass.edgeThickness = 3;
 outlinePass.pulsePeriod = 0;
-outlinePass.visibleEdgeColor.set(0x00ff88);
-outlinePass.hiddenEdgeColor.set(0x00ff88);
+outlinePass.visibleEdgeColor.set(0x3388ff);
+outlinePass.hiddenEdgeColor.set(0x2266cc);
 composer.addPass(outlinePass);
 
 let modelGroup = new THREE.Group(); scene.add(modelGroup);
@@ -207,26 +223,133 @@ let geoData = null;
 let selectMode = false, pointA = null, pointB = null, stairwellDefined = false;
 
 async function loadGeometry() {
-  const resp = await fetch(API+'/api/geometry');
-  const data = await resp.json();
-  if (data.error) { alert(data.error); return; }
-  geoData = data;
-  renderGeometry(data);
-  document.getElementById('file-info').innerHTML = `<span class="pill pill-green">✅ ${data.summary}</span>`;
+  showProgress();
+  updateProgress('加载中...', 0, 1);
+  try {
+    const resp = await fetch(API+'/api/geometry');
+    const data = await resp.json();
+    if (data.error) { hideProgress(); alert(data.error); return; }
+    geoData = data;
+    renderGeometry(data);
+    updateProgress('完成', 1, 1);
+    document.getElementById('file-info').innerHTML = `<span class="pill pill-green">✅ ${data.summary}</span>`;
+    document.getElementById('select-section').style.display = 'block';
+    document.getElementById('ai-section').style.display = 'block';
+    // Show stair design data if present (persisted from previous design)
+    if (data.stairDesign) {
+      const div = document.getElementById('design-result');
+      let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;color:#1b5e20;border-radius:6px;font-size:13px;">';
+      sdHtml += '<b>📐 已加载楼梯设计</b><br>';
+      if (data.stairDesign.flights) {
+        data.stairDesign.flights.forEach(f => {
+          sdHtml += `🏃 ${f.name}: ${f.steps}级 | 踏步${f.riser}×${f.tread}mm | 长${f.length}mm 高${f.height}mm<br>`;
+        });
+      }
+      if (data.stairDesign.landings) {
+        data.stairDesign.landings.forEach(l => {
+          sdHtml += `🪜 ${l.name}: ${l.l}×${l.w}×${l.t}mm | 标高${l.el}mm<br>`;
+        });
+      }
+      sdHtml += '</div>';
+      div.innerHTML = sdHtml;
+      document.getElementById('btn-download').style.display = 'block';
+    }
+  } catch(e) {
+    console.error('loadGeometry error:', e);
+  }
+  hideProgress();
+}
+
+// ── Progress bar helpers ──
+function showProgress(fileName) {
+  const p = document.getElementById('load-progress');
+  p.style.display = 'block';
+  document.getElementById('progress-file').textContent = fileName || '';
+}
+function hideProgress() {
+  document.getElementById('load-progress').style.display = 'none';
+}
+function updateProgress(label, current, total) {
+  document.getElementById('progress-phase').textContent = label;
+  document.getElementById('progress-count').textContent = `${current} / ${total}`;
+  const pct = total > 0 ? Math.round(current / total * 100) : 0;
+  document.getElementById('progress-bar').style.width = pct + '%';
+}
+
+// ── SSE streaming load ──
+async function loadGeometryStream() {
+  // Reset scene
+  modelGroup.clear();
+  showProgress();
+
+  let allElements = [];
+  let meta = null;
+
+  try {
+    const resp = await fetch(API + '/api/geometry/stream');
+    if (!resp.ok) {
+      updateProgress('流式不可用, 使用兼容模式...', 0, 1);
+      return loadGeometry();
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let data;
+        try { data = JSON.parse(line.slice(6)); }
+        catch (e) { continue; }
+
+        if (data.type === 'phase') {
+          updateProgress(data.label, data.current, data.total);
+        } else if (data.type === 'elements') {
+          allElements.push(...data.elements);
+        } else if (data.type === 'done') {
+          meta = data;
+        } else if (data.type === 'error') {
+          console.error('Stream error:', data.error);
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    console.error('SSE stream error:', e);
+    hideProgress();
+    return loadGeometry();
+  }
+
+  if (!meta) { hideProgress(); return; }
+
+  // Render everything in ONE pass using the proven renderGeometry
+  geoData = { elements: allElements, floorHeight: meta.floorHeight,
+              summary: meta.summary, stairDesign: meta.stairDesign };
+  renderGeometry(geoData);
+  hideProgress();
+
+  document.getElementById('file-info').innerHTML =
+    `<span class="pill pill-green">✅ ${meta.summary}</span>`;
   document.getElementById('select-section').style.display = 'block';
   document.getElementById('ai-section').style.display = 'block';
-  // Show stair design data if present (persisted from previous design)
-  if (data.stairDesign) {
+
+  if (meta.stairDesign) {
     const div = document.getElementById('design-result');
     let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;color:#1b5e20;border-radius:6px;font-size:13px;">';
     sdHtml += '<b>📐 已加载楼梯设计</b><br>';
-    if (data.stairDesign.flights) {
-      data.stairDesign.flights.forEach(f => {
+    if (meta.stairDesign.flights) {
+      meta.stairDesign.flights.forEach(f => {
         sdHtml += `🏃 ${f.name}: ${f.steps}级 | 踏步${f.riser}×${f.tread}mm | 长${f.length}mm 高${f.height}mm<br>`;
       });
     }
-    if (data.stairDesign.landings) {
-      data.stairDesign.landings.forEach(l => {
+    if (meta.stairDesign.landings) {
+      meta.stairDesign.landings.forEach(l => {
         sdHtml += `🪜 ${l.name}: ${l.l}×${l.w}×${l.t}mm | 标高${l.el}mm<br>`;
       });
     }
@@ -236,12 +359,19 @@ async function loadGeometry() {
   }
 }
 
+function cleanName(el) {
+  // Strip trailing :number (e.g. "混凝土墙_300mm:485346" → "混凝土墙_300mm")
+  let n = el.name || '';
+  n = n.replace(/:\d+\s*$/g, '');
+  return n;
+}
+
 function addBox(cx, cy, cz, w, h, d, el) {
   const geo = new THREE.BoxGeometry(w, h, d);
   const mat = (mats[el.type] || mats.IfcSlab).clone();
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(cx, cy, cz);
-  mesh.userData = { id:el.global_id, type:el.type, name:el.name };
+  mesh.userData = { id:el.global_id, type:el.type, name: cleanName(el) };
   modelGroup.add(mesh);
 }
 
@@ -445,7 +575,7 @@ function renderGeometry(data) {
       mesh.position.set(wb.xMax, wBot, wStart);
     }
 
-    mesh.userData = { id: wb.el.global_id, type: wb.el.type, name: wb.el.name };
+    mesh.userData = { id: wb.el.global_id, type: wb.el.type, name: cleanName(wb.el) };
     modelGroup.add(mesh);
   }
 
@@ -554,29 +684,8 @@ window.doDesign = async function() {
     // Also render stair geometry
     const sr = await fetch(API+'/api/generate-ifc', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...window._lastDesign, stairwell_width_mm:wid}) });
     if (sr.ok) {
-      // Load generated stair geometry (additive overlay on original structure)
-      const stairGeo = await fetch(API+'/api/geometry');
-      const sg = await stairGeo.json();
-      if (!sg.error) {
-        renderGeometry(sg);
-        // Show stair design data from server response
-        if (sg.stairDesign) {
-          let sdHtml = '<div style="margin-top:8px;padding:8px;background:#e8f5e9;color:#1b5e20;border-radius:6px;font-size:13px;">';
-          sdHtml += '<b>📐 楼梯设计数据 (已叠加至三维)</b><br>';
-          if (sg.stairDesign.flights) {
-            sg.stairDesign.flights.forEach(f => {
-              sdHtml += `🏃 ${f.name}: ${f.steps}级 | 踏步${f.riser}×${f.tread}mm | 长${f.length}mm 高${f.height}mm<br>`;
-            });
-          }
-          if (sg.stairDesign.landings) {
-            sg.stairDesign.landings.forEach(l => {
-              sdHtml += `🪜 ${l.name}: ${l.l}×${l.w}×${l.t}mm | 标高${l.el}mm<br>`;
-            });
-          }
-          sdHtml += '</div>';
-          div.innerHTML += sdHtml;
-        }
-      }
+      // Reload geometry with streaming (stair overlay included)
+      await loadGeometryStream();
     }
   } catch(e) { st.textContent = '❌ '+e.message; }
   btn.disabled = false;
@@ -596,8 +705,10 @@ document.getElementById('fu').addEventListener('change', async function() {
   const f = this.files[0]; if (!f) return;
   document.getElementById('file-info').textContent = '上传中...';
   const fd = new FormData(); fd.append('file', f);
-  await fetch(API+'/api/analyze', { method:'POST', body:fd });
-  loadGeometry();
+  const resp = await fetch(API+'/api/analyze', { method:'POST', body:fd });
+  const analyzeResult = await resp.json();
+  document.getElementById('file-info').textContent = analyzeResult.file || f.name;
+  loadGeometryStream();
 });
 
 // ── Component Picking ──
@@ -628,17 +739,7 @@ function doComponentPick(e) {
 }
 
 function selectMesh(mesh) {
-  if (pickedMesh && pickedMesh.material._origEmissive) {
-    pickedMesh.material.emissive.copy(pickedMesh.material._origEmissive);
-    pickedMesh.material.emissiveIntensity = pickedMesh.material._origEmissiveIntensity;
-  }
   pickedMesh = mesh;
-  if (!mesh.material._origEmissive) {
-    mesh.material._origEmissive = (mesh.material.emissive || new THREE.Color(0)).clone();
-    mesh.material._origEmissiveIntensity = mesh.material.emissiveIntensity || 0;
-  }
-  mesh.material.emissive = new THREE.Color(0x00ff44);
-  mesh.material.emissiveIntensity = 0.5;
   outlinePass.selectedObjects = [mesh];
   updateComponentPanel(mesh);
 }
@@ -648,17 +749,14 @@ function updateComponentPanel(mesh) {
   const panel = document.getElementById('component-panel');
   panel.style.display = 'block';
   const names = { IfcColumn:'柱', IfcBeam:'梁', IfcWall:'墙', IfcSlab:'楼板', IfcStair:'楼梯', IfcStairFlight:'梯段', IfcRailing:'栏杆' };
+  const name = (d.name||'—').replace(/:\d+\s*$/g, '');
   document.getElementById('component-info').innerHTML = `
     <span class="pill pill-blue">${names[d.type]||d.type}</span>
     <span class="pill pill-amber" style="margin-left:4px">${d.type}</span>
-    <div style="margin-top:6px;font-size:11px;color:var(--text2)">${d.name||'—'}</div>
+    <div style="margin-top:6px;font-size:11px;color:var(--text2)">${name}</div>
     <div style="font-size:10px;color:var(--text2);word-break:break-all;margin-top:4px">ID: ${d.id||'—'}</div>`;
 }
 window.clearPick = function() {
-  if (pickedMesh?.material._origEmissive) {
-    pickedMesh.material.emissive.copy(pickedMesh.material._origEmissive);
-    pickedMesh.material.emissiveIntensity = pickedMesh.material._origEmissiveIntensity;
-  }
   pickedMesh = null;
   outlinePass.selectedObjects = [];
   document.getElementById('component-panel').style.display = 'none';

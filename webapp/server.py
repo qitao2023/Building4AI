@@ -2,7 +2,7 @@
 StructureAI Backend — Zero-dependency HTTP server
 Upload IFC → Analyze → AI Design → Download IFC with stair + original structure
 """
-import json, urllib.request, urllib.error, tempfile, shutil, re
+import json, urllib.request, urllib.error, tempfile, shutil, re, time
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -13,9 +13,95 @@ from ifcopenshell.api import run
 
 PORT = 8765
 LAST_IFC = None  # stored uploaded IFC path
+LAST_IFC_MODEL = None  # cached ifcopenshell model (avoid repeated open)
+LAST_IFC_CONTEXT = None  # cached extract_ifc_context result
 LAST_STAIR_DESIGN = None  # {flights, landings, stairwell, sw_mm, well_w} for 3D overlay
+LAST_IFC_NAME_MAP = None  # {GlobalId: fixed_name} for CJK names decoded from raw IFC
+
+# ═══════════════════════════ IFC Name Decoding ══
+
+def _decode_ifc_text(text):
+    """Decode IFC STEP \\X2\\...\\X0\\ escape sequences to Unicode (non-regex)."""
+    if not text:
+        return text
+    # Decode \\X2\\hhhh...\\X0\\ sequences
+    result = []
+    i = 0
+    while i < len(text):
+        if text.startswith('\\X2\\', i):
+            end = text.find('\\X0\\', i + 4)
+            if end > i:
+                hex_str = text[i+4:end]
+                for j in range(0, len(hex_str), 4):
+                    cp = int(hex_str[j:j+4], 16)
+                    result.append(chr(cp))
+                i = end + 4
+                continue
+        elif text.startswith('\\X\\', i) and i + 6 <= len(text):
+            hh = text[i+3:i+5]
+            try:
+                result.append(chr(int(hh, 16)))
+                i += 5
+                continue
+            except ValueError:
+                pass
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
+
+def _build_name_map(ifc_path):
+    """Read raw IFC file and build {GlobalId: decoded_name} for entities with CJK names."""
+    nmap = {}
+    # \X2\ in bytes
+    X2_MARK = b'\\X2\\'
+    try:
+        with open(ifc_path, 'rb') as f:
+            for line in f:
+                if X2_MARK not in line:
+                    continue
+                try:
+                    txt = line.decode('utf-8', errors='surrogateescape')
+                except:
+                    continue
+                # Split on single quotes: #N= TYPE('gid',...,'name',...)
+                parts = txt.split("'")
+                if len(parts) < 3:
+                    continue
+                gid = parts[1]
+                # Find first meaningful name (skip $, empty, #refs)
+                for p in parts[2:]:
+                    p = p.strip()
+                    if not p or p == '$' or p.startswith('#'):
+                        continue
+                    if any(c.isalpha() for c in p):
+                        nmap[gid] = _decode_ifc_text(p)
+                        break
+    except Exception:
+        pass
+    return nmap
 
 # ═══════════════════════════════════ IFC Analysis ══
+def _fix_storey_names(ctx, name_map):
+    """Fix garbled storey names using decoded names from raw IFC."""
+    if not name_map:
+        return
+    for s in ctx.get("storeys", []):
+        gid = s.get("global_id")
+        if gid and gid in name_map:
+            s["name"] = name_map[gid]
+
+def _get_entity_z(e):
+    """Quickly get Z coordinate from an entity's ObjectPlacement (no tessellation)."""
+    try:
+        op = getattr(e, "ObjectPlacement", None)
+        if op and hasattr(op, "RelativePlacement") and hasattr(op.RelativePlacement, "Location"):
+            lc = op.RelativePlacement.Location
+            cs = lc.Coordinates if hasattr(lc, 'Coordinates') else lc
+            return float(cs[2])
+    except:
+        pass
+    return 0.0
+
 def extract_ifc_context(fp):
     m = ifcopenshell.open(fp)
     ctx = {"storeys":[],"beams":[],"columns":[],"slabs":[],"walls":[],"floor_heights":{},"column_positions":[],"beam_elevations":set()}
@@ -439,6 +525,80 @@ def _color_from_material(mat):
                                         return [int(r*255), int(g*255), int(b*255)]
     return None
 
+# ═══════════════════════════════ Geometry Extraction (shared helper) ══
+
+def _process_element(e, settings, opening_to_wall):
+    """Process a single IFC element: tessellate geometry, compute bbox, return element info dict.
+    Returns None for entities without valid geometry."""
+    import ifcopenshell.geom as geom
+    info = {"global_id": e.GlobalId, "name": e.Name or "", "type": e.is_a()}
+    # Normalize type name
+    for bt in ('IfcWall', 'IfcBeam', 'IfcColumn', 'IfcSlab', 'IfcStair', 'IfcStairFlight', 'IfcRailing', 'IfcOpeningElement'):
+        if e.is_a(bt):
+            info["type"] = bt
+            break
+    # Extract IFC material color
+    try:
+        c = _get_ifc_color(e)
+        if c: info["color"] = c
+    except: pass
+    # Tessellate geometry
+    try:
+        shape = geom.create_shape(settings, e)
+    except Exception:
+        return None  # skip entities without valid geometry
+    verts = list(shape.geometry.verts)
+    m4 = shape.transformation.matrix
+    xs, ys, zs = [], [], []
+    for i in range(0, len(verts), 3):
+        lx, ly, lz = verts[i], verts[i+1], verts[i+2]
+        wx = m4[0]*lx + m4[4]*ly + m4[8]*lz  + m4[12]
+        wy = m4[1]*lx + m4[5]*ly + m4[9]*lz  + m4[13]
+        wz = m4[2]*lx + m4[6]*ly + m4[10]*lz + m4[14]
+        xs.append(wx); ys.append(wy); zs.append(wz)
+    sx_w = round((max(xs) - min(xs)) * 1000)
+    sy_w = round((max(ys) - min(ys)) * 1000)
+    sz_w = round((max(zs) - min(zs)) * 1000)
+    cx_w = round((min(xs) + max(xs)) / 2 * 1000)
+    cy_w = round((min(ys) + max(ys)) / 2 * 1000)
+    cz_min = round(min(zs) * 1000)
+    cz_max = round(max(zs) * 1000)
+    if info["type"] == 'IfcColumn':
+        spans = [(sx_w, min(xs)*1000, max(xs)*1000),
+                 (sy_w, min(ys)*1000, max(ys)*1000),
+                 (sz_w, cz_min, cz_max)]
+        spans.sort(key=lambda x: x[0], reverse=True)
+        height, bot, top = spans[0]
+        info["size"] = [spans[1][0], spans[2][0], height]
+        info["pos"] = [cx_w, cy_w, round(bot)]
+    elif info["type"] in ('IfcBeam', 'IfcWall'):
+        if sx_w >= sy_w:
+            info["dir"] = "x"
+            info["size"] = [sy_w, sz_w, sx_w]
+        else:
+            info["dir"] = "y"
+            info["size"] = [sx_w, sz_w, sy_w]
+        info["pos"] = [cx_w, cy_w, cz_min]
+        if info["type"] == 'IfcBeam':
+            w, d, l = info["size"]
+            info["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', info["name"])
+    elif info["type"] == 'IfcOpeningElement':
+        sp = sorted([sx_w, sy_w, sz_w])
+        info["size"] = [sp[0], sp[2], sp[1]]
+        info["dir"] = "x" if sx_w >= sy_w else "y"
+        info["pos"] = [cx_w, cy_w, cz_min]
+        info["parent_wall"] = opening_to_wall.get(e.GlobalId)
+    elif info["type"] == 'IfcSlab':
+        info["pos"] = [cx_w, cy_w, cz_min]
+        info["size"] = [sx_w, sy_w, max(sz_w, 150)]
+    else:
+        info["pos"] = [cx_w, cy_w, cz_min]
+        info["size"] = [sx_w, sy_w, sz_w]
+    # Strip trailing :number for all element types (e.g. "混凝土墙_300mm:485346" → "混凝土墙_300mm")
+    info["name"] = re.sub(r':\d+$', '', info["name"])
+    return info
+
+
 class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin","*")
@@ -469,8 +629,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f.read())
 
     def do_GET(self):
-        if self.path=="/api/health": return self._json({"status":"ok","version":"0.5"})
+        if self.path=="/api/health": return self._json({"status":"ok","version":"0.7.0"})
         if self.path=="/api/geometry": return self._geometry()
+        if self.path=="/api/geometry/stream": return self._geometry_stream()
         if self.path.startswith("/api/"): return self._json({"error":"not found"},404)
         return self._static(self.path)
 
@@ -483,7 +644,7 @@ class Handler(BaseHTTPRequestHandler):
     _geom_cache = None  # class-level cache for geometry (cleared on new upload)
 
     def _geometry(self):
-        global LAST_IFC, LAST_STAIR_DESIGN
+        global LAST_IFC, LAST_IFC_MODEL, LAST_IFC_CONTEXT, LAST_STAIR_DESIGN
         if not LAST_IFC or not Path(LAST_IFC).exists():
             return self._json({"error":"No IFC uploaded yet"}, 400)
         # ── Cache key includes stair design to invalidate when design changes ──
@@ -493,98 +654,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(cached)
         try:
             import ifcopenshell.geom as geom
-            m = ifcopenshell.open(LAST_IFC)
+            m = (LAST_IFC_MODEL if LAST_IFC_MODEL else ifcopenshell.open(LAST_IFC))
             settings = geom.settings()
             elements = []
 
             # Build opening -> wall mapping
             opening_to_wall = {}
-            has_openings = set()
             for rel in m.by_type('IfcRelVoidsElement'):
                 try:
                     w_gid = rel.RelatingBuildingElement.GlobalId
                     o_gid = rel.RelatedOpeningElement.GlobalId
                     opening_to_wall[o_gid] = w_gid
-                    has_openings.add(w_gid)
                 except: pass
 
-            for e in m:
-                t = e.is_a()
-                if not any(e.is_a(bt) for bt in (
-                    'IfcColumn','IfcBeam','IfcSlab','IfcWall','IfcStair','IfcStairFlight',
-                    'IfcRailing','IfcOpeningElement')):
-                    continue
-
-                info = {"global_id": e.GlobalId, "name": e.Name or "", "type": t}
-                # Normalize type name for rendering: IfcWallStandardCase -> IfcWall
-                for bt in ('IfcWall', 'IfcBeam', 'IfcColumn', 'IfcSlab', 'IfcStair', 'IfcStairFlight', 'IfcRailing', 'IfcOpeningElement'):
-                    if e.is_a(bt):
-                        info["type"] = bt
-                        break
-                # Extract IFC material color
-                try:
-                    c = _get_ifc_color(e)
-                    if c: info["color"] = c
-                except: pass
-
-                # Use ifcopenshell.geom for authoritative world-space geometry
-                try:
-                    shape = geom.create_shape(settings, e)
-                except Exception:
-                    continue  # skip entities without valid geometry (data-only IFC)
-                if 1:
-                        verts = list(shape.geometry.verts)
-                        m4 = shape.transformation.matrix
-                        xs, ys, zs = [], [], []
-                        for i in range(0, len(verts), 3):
-                            lx, ly, lz = verts[i], verts[i+1], verts[i+2]
-                            wx = m4[0]*lx + m4[4]*ly + m4[8]*lz  + m4[12]
-                            wy = m4[1]*lx + m4[5]*ly + m4[9]*lz  + m4[13]
-                            wz = m4[2]*lx + m4[6]*ly + m4[10]*lz + m4[14]
-                            xs.append(wx); ys.append(wy); zs.append(wz)
-
-                        sx_w = round((max(xs) - min(xs)) * 1000)
-                        sy_w = round((max(ys) - min(ys)) * 1000)
-                        sz_w = round((max(zs) - min(zs)) * 1000)
-                        cx_w = round((min(xs) + max(xs)) / 2 * 1000)
-                        cy_w = round((min(ys) + max(ys)) / 2 * 1000)
-                        cz_min = round(min(zs) * 1000)
-                        cz_max = round(max(zs) * 1000)
-
-                        if info["type"] == 'IfcColumn':
-                            spans = [(sx_w, min(xs)*1000, max(xs)*1000),
-                                     (sy_w, min(ys)*1000, max(ys)*1000),
-                                     (sz_w, cz_min, cz_max)]
-                            spans.sort(key=lambda x: x[0], reverse=True)
-                            height, bot, top = spans[0]
-                            info["size"] = [spans[1][0], spans[2][0], height]
-                            info["pos"] = [cx_w, cy_w, round(bot)]
-                        elif info["type"] in ('IfcBeam', 'IfcWall'):
-                            if sx_w >= sy_w:
-                                info["dir"] = "x"
-                                info["size"] = [sy_w, sz_w, sx_w]
-                            else:
-                                info["dir"] = "y"
-                                info["size"] = [sx_w, sz_w, sy_w]
-                            info["pos"] = [cx_w, cy_w, cz_min]
-                            if info["type"] == 'IfcBeam':
-                                w, d, l = info["size"]
-                                info["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', info["name"])
-                                info["name"] = re.sub(r':\d+$', '', info["name"])
-                        elif info["type"] == 'IfcOpeningElement':
-                            sp = sorted([sx_w, sy_w, sz_w])
-                            info["size"] = [sp[0], sp[2], sp[1]]
-                            info["dir"] = "x" if sx_w >= sy_w else "y"
-                            info["pos"] = [cx_w, cy_w, cz_min]
-                            info["parent_wall"] = opening_to_wall.get(e.GlobalId)
-                        elif info["type"] == 'IfcSlab':
-                            info["pos"] = [cx_w, cy_w, cz_min]
-                            info["size"] = [sx_w, sy_w, max(sz_w, 150)]
-                        else:
-                            info["pos"] = [cx_w, cy_w, cz_min]
-                            info["size"] = [sx_w, sy_w, sz_w]
-
-                elements.append(info)
+            # Use by_type() for each target type — avoids iterating all entities
+            target_types = ['IfcColumn','IfcBeam','IfcSlab','IfcWall',
+                           'IfcStair','IfcStairFlight','IfcRailing','IfcOpeningElement']
+            for bt in target_types:
+                for e in m.by_type(bt):
+                    info = _process_element(e, settings, opening_to_wall)
+                    if info:
+                        elements.append(info)
 
             # Clean names: strip trailing :number
             for el in elements:
@@ -593,7 +683,7 @@ class Handler(BaseHTTPRequestHandler):
                     w, d, _ = el["size"]
                     el["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', el["name"])
 
-            ctx = extract_ifc_context(LAST_IFC)
+            ctx = LAST_IFC_CONTEXT if LAST_IFC_CONTEXT else extract_ifc_context(LAST_IFC)
             s = ctx["storeys"][0] if ctx["storeys"] else {"name": "F1"}
             fh = ctx["floor_heights"].get(s["name"], 4500)
             summary = f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])} 墙:{len(ctx['walls'])}"
@@ -605,7 +695,6 @@ class Handler(BaseHTTPRequestHandler):
                     sd["flights"], sd["landings"], sd["stairwell"],
                     sd["sw_mm"], sd["well_w"])
                 elements.extend(stair_els)
-                # Collect stair design data for display
                 stair_info = {"flights": [], "landings": []}
                 for f in sd["flights"]:
                     stair_info["flights"].append({
@@ -631,6 +720,177 @@ class Handler(BaseHTTPRequestHandler):
             import traceback; traceback.print_exc()
             return self._json({"error": str(e)}, 500)
 
+    def _geometry_stream(self):
+        """SSE endpoint: pre-scans storey membership, then tessellates and streams floor-by-floor."""
+        global LAST_IFC, LAST_IFC_MODEL, LAST_IFC_CONTEXT, LAST_STAIR_DESIGN
+        if not LAST_IFC or not Path(LAST_IFC).exists():
+            return self._json({"error":"No IFC uploaded yet"}, 400)
+
+        self.send_response(200); self._cors()
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        stair_key = hash(json.dumps(LAST_STAIR_DESIGN, sort_keys=True)) if LAST_STAIR_DESIGN else None
+        cached = getattr(Handler, '_geom_cache', None)
+
+        def _send(data):
+            self.wfile.write(f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
+
+        TYPE_CN = {'IfcColumn':'柱','IfcBeam':'梁','IfcSlab':'板','IfcWall':'墙',
+                   'IfcStair':'楼梯','IfcStairFlight':'梯段','IfcRailing':'栏杆','IfcOpeningElement':'洞口'}
+
+        try:
+            # ── Cache hit: group & stream ──
+            if cached and cached.get('_file') == LAST_IFC and cached.get('_stair_key') == stair_key:
+                all_elements = list(cached.get("elements", []))
+                ctx = LAST_IFC_CONTEXT if LAST_IFC_CONTEXT else extract_ifc_context(LAST_IFC)
+                storeys = sorted(ctx.get("storeys", []), key=lambda s: s.get("elevation", 0))
+                if not storeys: storeys = [{"name": "F1", "elevation": 0}]
+                groups = {s["name"]: [] for s in storeys}
+                for el in all_elements:
+                    z = el["pos"][2]; matched = storeys[0]["name"]
+                    for s in storeys:
+                        if z >= s["elevation"] - 500: matched = s["name"]
+                    groups[matched].append(el)
+                total = len(all_elements); sent = 0
+                for s in storeys:
+                    batch = groups.get(s["name"], [])
+                    if not batch: continue
+                    tc = {}
+                    for el in batch: t = el["type"]; tc[t] = tc.get(t, 0) + 1
+                    parts = [f"{TYPE_CN.get(t,t)}{c}" for t, c in sorted(tc.items())]
+                    _send({"type": "phase", "label": f"{s['name']} ({', '.join(parts)})", "current": sent, "total": total})
+                    _send({"type": "elements", "elements": batch})
+                    sent += len(batch)
+                    time.sleep(0.05)
+                _send({"type": "phase", "label": "完成", "current": total, "total": total})
+                _send({"type": "done", "summary": cached.get("summary",""),
+                       "floorHeight": cached.get("floorHeight", 4500),
+                       "stairDesign": cached.get("stairDesign")})
+                return
+
+            import ifcopenshell.geom as geom
+            m = (LAST_IFC_MODEL if LAST_IFC_MODEL else ifcopenshell.open(LAST_IFC))
+            settings = geom.settings()
+            ctx = LAST_IFC_CONTEXT if LAST_IFC_CONTEXT else extract_ifc_context(LAST_IFC)
+            storeys = sorted(ctx.get("storeys", []), key=lambda s: s.get("elevation", 0))
+            if not storeys: storeys = [{"name": "F1", "elevation": 0}]
+
+            # Map GlobalId -> storey name for quick lookup
+            name_map = LAST_IFC_NAME_MAP
+
+            # ── Phase 1: Quick pre-scan (Z-only, no tessellation) ──
+            target_types = ['IfcColumn','IfcBeam','IfcSlab','IfcWall',
+                           'IfcStair','IfcStairFlight','IfcRailing','IfcOpeningElement']
+            _send({"type": "phase", "label": "正在分析楼层...", "current": 0, "total": 1})
+
+            # Build entity lists per storey (entity reference only, not tessellated yet)
+            storey_entities = {s["name"]: [] for s in storeys}
+            for bt in target_types:
+                for e in m.by_type(bt):
+                    z = _get_entity_z(e)
+                    matched = storeys[0]["name"]
+                    for s in storeys:
+                        if z >= s["elevation"] - 500:
+                            matched = s["name"]
+                    storey_entities[matched].append(e)
+
+            # Count totals
+            total = sum(len(v) for v in storey_entities.values())
+            per_storey = {sn: len(elist) for sn, elist in storey_entities.items()}
+
+            _send({"type": "phase", "label": f"共{len(storeys)}层 {total}个构件", "current": 0, "total": total})
+
+            # ── Phase 2: Tessellate & stream storey-by-storey ──
+            opening_to_wall = {}
+            for rel in m.by_type('IfcRelVoidsElement'):
+                try:
+                    opening_to_wall[rel.RelatedOpeningElement.GlobalId] = rel.RelatingBuildingElement.GlobalId
+                except: pass
+
+            all_elements = []
+            sent = 0
+            s0 = storeys[0]["name"] if storeys else "F1"
+            fh = ctx["floor_heights"].get(s0, 4500)
+            summary = f"梁:{len(ctx['beams'])} 柱:{len(ctx['columns'])} 板:{len(ctx['slabs'])} 墙:{len(ctx['walls'])}"
+
+            for s in storeys:
+                sn = s["name"]
+                entities = storey_entities.get(sn, [])
+                if not entities: continue
+
+                # Build type summary for label
+                tc_est = {}
+                for e in entities:
+                    for bt in target_types:
+                        if e.is_a(bt):
+                            tc_est[bt] = tc_est.get(bt, 0) + 1
+                            break
+                parts = [f"{TYPE_CN.get(t,t)}{c}" for t, c in sorted(tc_est.items())]
+                _send({"type": "phase", "label": f"{sn} ({', '.join(parts)}) 解析中...", "current": sent, "total": total})
+
+                batch = []
+                for e in entities:
+                    info = _process_element(e, settings, opening_to_wall)
+                    if info:
+                        # Fix garbled name
+                        if name_map and info["global_id"] in name_map:
+                            info["name"] = name_map[info["global_id"]]
+                        # Clean name
+                        info["name"] = re.sub(r':\d+\s*$', '', info["name"])
+                        if info["type"] == 'IfcBeam':
+                            w2, d2, _ = info["size"]
+                            info["name"] = re.sub(r'\d+x\d+', f'{w2:.0f}x{d2:.0f}', info["name"])
+                        batch.append(info)
+
+                if batch:
+                    all_elements.extend(batch)
+                    _send({"type": "elements", "elements": batch})
+                sent += len(entities)
+                time.sleep(0.05)
+                if self.wfile.closed: return
+
+            # Stair overlay
+            stair_info = None
+            if LAST_STAIR_DESIGN:
+                sd = LAST_STAIR_DESIGN
+                stair_els = build_stair_mesh_elements(
+                    sd["flights"], sd["landings"], sd["stairwell"],
+                    sd["sw_mm"], sd["well_w"])
+                all_elements.extend(stair_els)
+                stair_info = {"flights": [], "landings": []}
+                for f in sd["flights"]:
+                    stair_info["flights"].append({
+                        "name": f.get("name",""), "steps": f.get("n",0),
+                        "riser": f.get("riser",0), "tread": f.get("tread",0),
+                        "length": f.get("len",0), "height": f.get("h",0)
+                    })
+                for l in sd["landings"]:
+                    stair_info["landings"].append({
+                        "name": l.get("name",""), "l": l.get("l",0),
+                        "w": l.get("w",0), "t": l.get("t",0), "el": l.get("el",0)
+                    })
+                summary += f" | 楼梯: {len(sd['flights'])}跑 {sum(f.get('n',0) for f in sd['flights'])}级"
+
+            _send({"type": "phase", "label": "完成", "current": total, "total": total})
+            _send({"type": "done", "summary": summary, "floorHeight": fh,
+                   "stairDesign": stair_info})
+
+            # Cache result
+            result = {"elements": all_elements, "floorHeight": fh,
+                "summary": summary, "stairDesign": stair_info,
+                "_file": LAST_IFC, "_stair_key": stair_key}
+            Handler._geom_cache = result
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            try:
+                _send({"type": "error", "error": str(e)})
+            except: pass
+
     def _read_json(self):
         """Read JSON body with proper encoding detection."""
         cl = int(self.headers.get("Content-Length", 0))
@@ -654,9 +914,20 @@ class Handler(BaseHTTPRequestHandler):
             if b'Content-Disposition' not in part: continue
             hdr_end = part.find(b'\r\n\r\n')
             if hdr_end < 0: continue
-            hdrs = part[:hdr_end].decode('latin-1')
-            m = re.search(r'filename="([^"]*)"', hdrs)
-            if m: filename = m.group(1)
+            # Decode headers: try UTF-8 first (for CJK filenames), fallback to latin-1
+            hdr_bytes = part[:hdr_end]
+            try:
+                hdrs = hdr_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                hdrs = hdr_bytes.decode('latin-1')
+            # RFC 5987 filename* (UTF-8 percent-encoded) takes precedence
+            m_star = re.search(r"filename\*=(?:UTF-8''|utf-8'')([^;\s]+)", hdrs)
+            if m_star:
+                from urllib.parse import unquote
+                filename = unquote(m_star.group(1))
+            else:
+                m = re.search(r'filename="([^"]*)"', hdrs)
+                if m: filename = m.group(1)
             if 'name="file"' in hdrs:
                 data = part[hdr_end+4:]
                 if data.endswith(b'\r\n'): data = data[:-2]
@@ -664,17 +935,21 @@ class Handler(BaseHTTPRequestHandler):
         return filename, data
 
     def _analyze(self):
-        global LAST_IFC, LAST_STAIR_DESIGN
+        global LAST_IFC, LAST_IFC_MODEL, LAST_IFC_CONTEXT, LAST_IFC_NAME_MAP, LAST_STAIR_DESIGN
         filename, data = self._parse_multipart()
         if not data: return self._json({"error":"empty file"},400)
         with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
             tmp.write(data); tp = tmp.name
         if LAST_IFC and Path(LAST_IFC).exists(): Path(LAST_IFC).unlink(missing_ok=True)
         LAST_IFC = tp
-        LAST_STAIR_DESIGN = None  # clear stair design on new upload (re-upload resets)
-        Handler._geom_cache = None  # clear geometry cache on new upload
+        LAST_STAIR_DESIGN = None
+        Handler._geom_cache = None
         try:
+            LAST_IFC_MODEL = ifcopenshell.open(tp)
+            LAST_IFC_NAME_MAP = _build_name_map(tp)  # decode CJK entity names from raw file
             ctx = extract_ifc_context(tp)
+            _fix_storey_names(ctx, LAST_IFC_NAME_MAP)  # fix garbled storey names
+            LAST_IFC_CONTEXT = ctx  # cache context for reuse
             s = ctx["storeys"][0] if ctx["storeys"] else {"name":"F1","elevation":0}
             fh = ctx["floor_heights"].get(s["name"],4500)
             bt = ctx["beam_elevations"][-1] if ctx["beam_elevations"] else fh
@@ -736,5 +1011,5 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error":str(e)},500)
 
 if __name__ == "__main__":
-    print(f"StructureAI v0.5 → http://localhost:{PORT}")
+    print(f"StructureAI v0.7.0 → http://localhost:{PORT}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
