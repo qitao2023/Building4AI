@@ -352,11 +352,6 @@ async function loadGeometryStream() {
 
   if (!meta) { hideProgress(); return; }
 
-  // Debug: count element types
-  const typeCount = {};
-  allElements.forEach(el => { typeCount[el.type] = (typeCount[el.type]||0)+1; });
-  console.log('loadGeometryStream done:', allElements.length, 'elements', JSON.stringify(typeCount));
-
   // Render everything in ONE pass using the proven renderGeometry
   geoData = { elements: allElements, floorHeight: meta.floorHeight,
               summary: meta.summary, stairDesign: meta.stairDesign };

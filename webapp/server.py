@@ -736,7 +736,6 @@ class Handler(BaseHTTPRequestHandler):
 
         stair_key = hash(json.dumps(LAST_STAIR_DESIGN, sort_keys=True)) if LAST_STAIR_DESIGN else None
         cached = getattr(Handler, '_geom_cache', None)
-        print(f"[DEBUG] _geometry_stream start: LAST_STAIR_DESIGN={LAST_STAIR_DESIGN is not None}, cache={cached is not None}, stair_key={stair_key}")
 
         def _send(data):
             self.wfile.write(f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode())
@@ -858,15 +857,13 @@ class Handler(BaseHTTPRequestHandler):
 
             # Stair overlay — send as elements batch for immediate rendering
             stair_info = None
-            print(f"[DEBUG] _geometry_stream: LAST_STAIR_DESIGN = {LAST_STAIR_DESIGN is not None}, cached = {cached is not None}")
             if LAST_STAIR_DESIGN:
                 sd = LAST_STAIR_DESIGN
                 stair_els = build_stair_mesh_elements(
                     sd["flights"], sd["landings"], sd["stairwell"],
                     sd["sw_mm"], sd["well_w"])
                 all_elements.extend(stair_els)
-                # Send stair elements to frontend — they were missing from SSE stream!
-                print(f"[DEBUG] Sending {len(stair_els)} stair elements via SSE")
+                # Send stair overlay elements to frontend
                 _send({"type": "phase", "label": f"楼梯 ({len(stair_els)} 构件)", "current": total, "total": total})
                 _send({"type": "elements", "elements": stair_els})
                 stair_info = {"flights": [], "landings": []}
@@ -1013,7 +1010,6 @@ class Handler(BaseHTTPRequestHandler):
                 "flights": flights, "landings": landings,
                 "stairwell": sw, "sw_mm": sw_mm, "well_w": well_w
             }
-            print(f"[DEBUG] LAST_STAIR_DESIGN set: {len(flights)} flights, {len(landings)} landings")
             Handler._geom_cache = None  # invalidate geometry cache
         except Exception as e:
             import traceback; traceback.print_exc()
