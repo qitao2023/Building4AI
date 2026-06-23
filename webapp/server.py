@@ -855,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(0.05)
                 if self.wfile.closed: return
 
-            # Stair overlay
+            # Stair overlay — send as elements batch for immediate rendering
             stair_info = None
             if LAST_STAIR_DESIGN:
                 sd = LAST_STAIR_DESIGN
@@ -863,6 +863,9 @@ class Handler(BaseHTTPRequestHandler):
                     sd["flights"], sd["landings"], sd["stairwell"],
                     sd["sw_mm"], sd["well_w"])
                 all_elements.extend(stair_els)
+                # Send stair elements to frontend — they were missing from SSE stream!
+                _send({"type": "phase", "label": f"楼梯 ({len(stair_els)} 构件)", "current": total, "total": total})
+                _send({"type": "elements", "elements": stair_els})
                 stair_info = {"flights": [], "landings": []}
                 for f in sd["flights"]:
                     stair_info["flights"].append({
