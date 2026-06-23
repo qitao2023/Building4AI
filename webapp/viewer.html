@@ -773,8 +773,27 @@ canvas.addEventListener('mousemove', (e) => {
   }
 
   // Use model surface hit as primary reference (matches click behavior), ground as fallback
-  const refPt = surfaceHit || gp;
+  let refPt = surfaceHit || gp;
   if (!refPt) return;
+
+  // Snap to nearest column grid intersection
+  if (columnGridData && (columnGridData.colX.length || columnGridData.colY.length)) {
+    const x_mm = refPt.x * 1000;   // world X → IFC X (mm)
+    const y_mm = -refPt.z * 1000;  // world Z → -IFC Y (mm)
+    let snapX = x_mm, snapY = y_mm;
+    const THRESH = 600; // snap within 600mm
+    if (columnGridData.colX.length) {
+      let best = columnGridData.colX.reduce((a, b) => Math.abs(x_mm - a) < Math.abs(x_mm - b) ? a : b);
+      if (Math.abs(x_mm - best) < THRESH) snapX = best;
+    }
+    if (columnGridData.colY.length) {
+      let best = columnGridData.colY.reduce((a, b) => Math.abs(y_mm - a) < Math.abs(y_mm - b) ? a : b);
+      if (Math.abs(y_mm - best) < THRESH) snapY = best;
+    }
+    if (snapX !== x_mm || snapY !== y_mm) {
+      refPt = new THREE.Vector3(snapX / 1000, refPt.y, -snapY / 1000);
+    }
+  }
 
   if (!pointA) {
     // Phase 1: ground hover ring + surface hint
@@ -886,13 +905,11 @@ document.addEventListener('keydown', (e) => {
 async function addStairToScene() {
   const resp = await fetch(API + '/api/stair-overlay');
   const data = await resp.json();
-  console.log('addStairToScene:', data.elements ? data.elements.length : 0, 'elements');
   if (!data.elements || !data.elements.length) return;
   for (const el of data.elements) {
     const b = getBox(el);
     addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
   }
-  console.log('addStairToScene done — modelGroup now has', modelGroup.children.length, 'children');
 }
 
 // ── Design ──

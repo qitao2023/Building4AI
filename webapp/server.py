@@ -700,13 +700,11 @@ class Handler(BaseHTTPRequestHandler):
     def _stair_overlay(self):
         """Return only the stair overlay mesh elements (for incremental rendering after design)."""
         if not LAST_STAIR_DESIGN:
-            print("[stair-overlay] LAST_STAIR_DESIGN is None, returning empty")
             return self._json({"elements": []})
         sd = LAST_STAIR_DESIGN
         stair_els = build_stair_mesh_elements(
             sd["flights"], sd["landings"], sd["stairwell"],
             sd["sw_mm"], sd["well_w"])
-        print(f"[stair-overlay] returning {len(stair_els)} elements")
         return self._json({"elements": stair_els})
 
     def _geometry(self):
