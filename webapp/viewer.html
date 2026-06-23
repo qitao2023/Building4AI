@@ -187,7 +187,7 @@ const mats = {
   select: new THREE.MeshStandardMaterial({color:0x5599cc, roughness:0.3, emissive:0x335577, emissiveIntensity:0.2, transparent:true, opacity:0.5}),
   // Selection UX materials
   hoverDot: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.7, depthTest:false}),
-  previewRect: new THREE.MeshBasicMaterial({color:0x5599cc, transparent:true, opacity:0.22, depthTest:false, side:THREE.DoubleSide}),
+  previewRect: new THREE.MeshStandardMaterial({color:0x5599cc, roughness:0.3, emissive:0x335577, emissiveIntensity:0.15, transparent:true, opacity:0.35, depthTest:false, side:THREE.DoubleSide}),
   cornerMarker: new THREE.MeshBasicMaterial({color:0x00ff88, depthTest:false}),
   cornerRing: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.45, depthTest:false, side:THREE.DoubleSide}),
   gridDot: new THREE.MeshBasicMaterial({color:0x889999, transparent:true, opacity:0.5, depthTest:false}),
