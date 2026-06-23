@@ -191,9 +191,9 @@ const mats = {
   IfcStair: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcStairFlight: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcRailing: new THREE.MeshStandardMaterial({color:0x666666, roughness:0.4, metalness:0.3}),
-  // Steel H-beam materials — darker, more metallic
-  IfcBeam_Steel:   new THREE.MeshStandardMaterial({color:0x5c8a9e, roughness:0.3, metalness:0.55}),  // H型钢梁
-  IfcColumn_Steel: new THREE.MeshStandardMaterial({color:0xcc9520, roughness:0.3, metalness:0.55}),  // H型钢柱
+  // Steel materials — 钢柱 RGB(156,88,177) / 钢梁 RGB(118,157,72)
+  IfcBeam_Steel:   new THREE.MeshStandardMaterial({color:0x769d48, roughness:0.3, metalness:0.55}),  // 钢梁
+  IfcColumn_Steel: new THREE.MeshStandardMaterial({color:0x9c58b1, roughness:0.3, metalness:0.55}),  // 钢柱
   select: new THREE.MeshStandardMaterial({color:0x5599cc, roughness:0.3, emissive:0x335577, emissiveIntensity:0.2, transparent:true, opacity:0.5}),
   // Selection UX materials
   hoverDot: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.7, depthTest:false}),
@@ -430,13 +430,90 @@ function cleanName(el) {
 }
 
 function addBox(cx, cy, cz, w, h, d, el) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const matKey = el.steelProfile === 'H' ? el.type + '_Steel' : el.type;
+  const sp = el.steelProfile;
+  let geo;
+  if (sp && typeof sp === 'object' && (sp.type === 'H' || sp.type === 'CHS')) {
+    geo = makeSteelGeometry(el, w, h, d, sp);
+  } else {
+    geo = new THREE.BoxGeometry(w, h, d);
+  }
+  const isSteel = sp && (sp === 'H' || sp === 'CHS' || (typeof sp === 'object' && sp.type));
+  const matKey = isSteel ? el.type + '_Steel' : el.type;
   const mat = (mats[matKey] || mats[el.type] || mats.IfcSlab).clone();
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(cx, cy, cz);
-  mesh.userData = { id:el.global_id, type:el.type, name: cleanName(el), steelProfile: el.steelProfile || null };
+  mesh.userData = { id:el.global_id, type:el.type, name: cleanName(el), steelProfile: sp || null };
   modelGroup.add(mesh);
+}
+
+function createHShape(B, H, tw, tf) {
+  // 2D H-shaped cross-section in XY plane: B=width(X), H=height(Y)
+  const hB = B / 2, hH = H / 2, htw = tw / 2;
+  const shape = new THREE.Shape();
+  shape.moveTo(-hB, -hH);           // bottom-left
+  shape.lineTo( hB, -hH);           // bottom-right
+  shape.lineTo( hB, -hH + tf);      // up flange
+  shape.lineTo( htw, -hH + tf);     // in to web
+  shape.lineTo( htw,  hH - tf);     // up web
+  shape.lineTo( hB,  hH - tf);      // out to flange
+  shape.lineTo( hB,  hH);           // up to top
+  shape.lineTo(-hB,  hH);           // left across top
+  shape.lineTo(-hB,  hH - tf);      // down flange
+  shape.lineTo(-htw, hH - tf);      // in to web
+  shape.lineTo(-htw,-hH + tf);      // down web
+  shape.lineTo(-hB, -hH + tf);      // out to flange
+  shape.closePath();
+  return shape;
+}
+
+function createCHSShape(D, t) {
+  // Circular ring cross-section (hollow tube) in XY plane
+  // D = outer diameter (mm converted to m before calling), t = wall thickness (m)
+  const outerR = D / 2;
+  const innerR = Math.max(outerR - t, 0.001);  // prevent zero/negative inner radius
+  const shape = new THREE.Shape();
+  shape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+  const hole = new THREE.Path();
+  hole.absarc(0, 0, innerR, 0, Math.PI * 2, true);
+  shape.holes.push(hole);
+  return shape;
+}
+
+function makeSteelGeometry(el, w, h, d, sp) {
+  // Convert mm→m: profile params are in mm, geometry in m
+  let shape;
+  if (sp.type === 'CHS') {
+    shape = createCHSShape(sp.D / 1000, sp.t / 1000);
+  } else {
+    // H-beam (default)
+    shape = createHShape(sp.B / 1000, sp.H / 1000, sp.tw / 1000, sp.tf / 1000);
+  }
+
+  let extrudeDepth;
+  if (el.type === 'IfcColumn') {
+    extrudeDepth = h;  // column height
+  } else if (el.dir === 'y') {
+    extrudeDepth = d;  // beam along Z
+  } else {
+    extrudeDepth = w;  // beam along X (default)
+  }
+
+  const geo = new THREE.ExtrudeGeometry(shape, { steps: 1, depth: extrudeDepth, bevelEnabled: false });
+
+  // Rotate so extrusion axis aligns with element orientation
+  if (el.type === 'IfcColumn') {
+    geo.rotateX(-Math.PI / 2);      // cross-section horizontal, extrusion vertical (Y)
+  } else if (el.dir !== 'y') {
+    geo.rotateY(Math.PI / 2);       // cross-section vertical (YZ), extrusion along X
+  }
+  // Beam along Z (dir='y'): no rotation — extrusion already along Z
+
+  // Center the geometry
+  geo.computeBoundingBox();
+  const center = new THREE.Vector3();
+  geo.boundingBox.getCenter(center);
+  geo.translate(-center.x, -center.y, -center.z);
+  return geo;
 }
 
 function getBox(el) {
@@ -1088,8 +1165,13 @@ function updateComponentPanel(mesh) {
   const panel = document.getElementById('component-panel');
   panel.style.display = 'block';
   const names = { IfcColumn:'柱', IfcBeam:'梁', IfcWall:'墙', IfcSlab:'楼板', IfcStair:'楼梯', IfcStairFlight:'梯段', IfcRailing:'栏杆' };
-  const steelNames = { IfcColumn:'H型钢柱', IfcBeam:'H型钢梁' };
-  const typeLabel = d.steelProfile === 'H' ? (steelNames[d.type] || names[d.type]) : names[d.type];
+  const steelLabels = {
+    H:   { IfcColumn:'H型钢柱',  IfcBeam:'H型钢梁' },
+    CHS: { IfcColumn:'圆管钢柱', IfcBeam:'圆管钢梁' },
+  };
+  const sp = d.steelProfile;
+  const spType = (sp && typeof sp === 'object') ? sp.type : sp;
+  const typeLabel = (steelLabels[spType] && steelLabels[spType][d.type]) || names[d.type];
   const name = (d.name||'—').replace(/:\d+\s*$/g, '');
   document.getElementById('component-info').innerHTML = `
     <span class="pill pill-blue">${typeLabel||d.type}</span>

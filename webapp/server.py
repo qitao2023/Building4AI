@@ -632,9 +632,7 @@ def _process_element(e, settings, opening_to_wall):
             info["dir"] = "y"
             info["size"] = [sx_w, sz_w, sy_w]
         info["pos"] = [cx_w, cy_w, cz_min]
-        if info["type"] == 'IfcBeam':
-            w, d, l = info["size"]
-            info["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', info["name"])
+        # Note: name dimension replacement moved to _geometry() paths with steelProfile guard
     elif info["type"] == 'IfcOpeningElement':
         sp = sorted([sx_w, sy_w, sz_w])
         info["size"] = [sp[0], sp[2], sp[1]]
@@ -654,24 +652,134 @@ def _process_element(e, settings, opening_to_wall):
     return info
 
 
+# ── Standard Chinese I-beam (工字钢) section table ──
+# GB/T 706-2016 hot-rolled I-beam: model → (H, B, tw, tf) in mm
+_I_BEAM_TABLE = {
+    'I10':   (100, 68,  4.5,  7.6),
+    'I12.6': (126, 74,  5.0,  8.4),
+    'I12':   (120, 74,  5.0,  8.4),  # alias
+    'I14':   (140, 80,  5.5,  9.1),
+    'I16':   (160, 88,  6.0,  9.9),
+    'I18':   (180, 94,  6.5, 10.7),
+    'I20a':  (200, 100,  7.0, 11.4),
+    'I20b':  (200, 102,  9.0, 11.4),
+    'I20':   (200, 100,  7.0, 11.4),  # alias → I20a
+    'I22a':  (220, 110,  7.5, 12.3),
+    'I22b':  (220, 112,  9.5, 12.3),
+    'I22':   (220, 110,  7.5, 12.3),  # alias → I22a
+    'I25a':  (250, 116,  8.0, 13.0),
+    'I25b':  (250, 118, 10.0, 13.0),
+    'I25':   (250, 116,  8.0, 13.0),  # alias → I25a
+    'I28a':  (280, 122,  8.5, 13.7),
+    'I28b':  (280, 124, 10.5, 13.7),
+    'I28':   (280, 122,  8.5, 13.7),  # alias → I28a
+    'I32a':  (320, 130,  9.5, 15.0),
+    'I32b':  (320, 132, 11.5, 15.0),
+    'I32c':  (320, 134, 13.5, 15.0),
+    'I32':   (320, 130,  9.5, 15.0),  # alias → I32a
+    'I36a':  (360, 136, 10.0, 15.8),
+    'I36b':  (360, 138, 12.0, 15.8),
+    'I36c':  (360, 140, 14.0, 15.8),
+    'I36':   (360, 136, 10.0, 15.8),  # alias → I36a
+    'I40a':  (400, 142, 10.5, 16.5),
+    'I40b':  (400, 144, 12.5, 16.5),
+    'I40c':  (400, 146, 14.5, 16.5),
+    'I40':   (400, 142, 10.5, 16.5),  # alias → I40a
+    'I45a':  (450, 150, 11.5, 18.0),
+    'I45b':  (450, 152, 13.5, 18.0),
+    'I45c':  (450, 154, 15.5, 18.0),
+    'I45':   (450, 150, 11.5, 18.0),  # alias → I45a
+    'I50a':  (500, 158, 12.0, 20.0),
+    'I50b':  (500, 160, 14.0, 20.0),
+    'I50c':  (500, 162, 16.0, 20.0),
+    'I50':   (500, 158, 12.0, 20.0),  # alias → I50a
+    'I56a':  (560, 166, 12.5, 21.0),
+    'I56b':  (560, 168, 14.5, 21.0),
+    'I56c':  (560, 170, 16.5, 21.0),
+    'I56':   (560, 166, 12.5, 21.0),  # alias → I56a
+    'I63a':  (630, 176, 13.0, 22.0),
+    'I63b':  (630, 178, 15.0, 22.0),
+    'I63c':  (630, 180, 17.0, 22.0),
+    'I63':   (630, 176, 13.0, 22.0),  # alias → I63a
+}
+
+
 def _detect_steel_profile(info):
-    """Detect if an element is H-shaped steel from its name, and set info['steelProfile']."""
+    """Detect steel profile type from element name, and parse profile params.
+    Sets info['steelProfile'] = {'type':'H', 'H':..., 'B':..., ...} or {'type':'CHS','D':...,'t':...}
+    or just a type string if params cannot be parsed."""
     if info["type"] not in ('IfcBeam', 'IfcColumn'):
         return
     decoded = _decode_ifc_text(info["name"])
-    # Pattern 1: Chinese name contains H型钢 / H形钢 (covers 热轧H型钢, 变截面H型钢, etc.)
+
+    # ── Circular Hollow Section (圆管 / ΦDxt) ──
+    if '圆管' in decoded or re.search(r'[Φϕ][\d.]+', decoded):
+        m = re.search(r'[Φϕ]?(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)', decoded)
+        if m:
+            D = float(m.group(1))
+            t = float(m.group(2))
+            info["steelProfile"] = {"type": "CHS", "D": D, "t": t}
+        else:
+            info["steelProfile"] = "CHS"
+        return
+
+    # ── I-beam (工字钢) — standard sections from GB/T 706 lookup table ──
+    if '工字钢' in decoded:
+        m = re.search(r'\b(I\d+(?:\.\d+)?[a-c]?)\b', decoded, re.IGNORECASE)
+        if not m:
+            # Also try raw name
+            m = re.search(r'\b(I\d+(?:\.\d+)?[a-c]?)\b', info["name"], re.IGNORECASE)
+        if m:
+            key = m.group(1).upper()
+            # Try case-insensitive lookup
+            match_key = None
+            for k in _I_BEAM_TABLE:
+                if k.upper() == key:
+                    match_key = k
+                    break
+            if match_key:
+                H, B, tw, tf = _I_BEAM_TABLE[match_key]
+                info["steelProfile"] = {"type": "H", "H": H, "B": B, "tw": tw, "tf": tf}
+                return
+        info["steelProfile"] = "H"  # I-beam detected but model not in table
+        return
+
+    # ── H-shaped steel (H型钢 / H形钢 / HdimXdim...) ──
+    is_h_steel = False
     if 'H型钢' in decoded or 'H形钢' in decoded:
-        info["steelProfile"] = "H"
+        is_h_steel = True
+    elif re.search(r'(?:^|:)H[\(（]?\d+', decoded, re.IGNORECASE):
+        is_h_steel = True
+    elif re.search(r'\bH\d+\s*[xX×]\s*\d+', info["name"], re.IGNORECASE):
+        is_h_steel = True
+
+    if not is_h_steel:
         return
-    # Pattern 2: Name segment starts with H followed by dimensions (e.g. "H500X200X8X10", "H(600/450)X220X6X12")
-    # Match :H(... or standalone Hddd pattern in the name
-    if re.search(r'(?:^|:)H[\(（]?\d+', decoded, re.IGNORECASE):
+
+    # Parse H profile dimensions: H(H1/H2)XBXtwXtf or HHeightXBXtwXtf
+    m = re.search(r'H[\(（]?(\d+(?:\.\d+)?)(?:[/／](\d+(?:\.\d+)?))?[\)）]?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
+                  decoded, re.IGNORECASE)
+    if not m:
+        m = re.search(r'H[\(（]?(\d+(?:\.\d+)?)(?:[/／](\d+(?:\.\d+)?))?[\)）]?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
+                      info["name"], re.IGNORECASE)
+
+    if m:
+        h1 = float(m.group(1))
+        h2 = float(m.group(2)) if m.group(2) else None
+        b  = float(m.group(3))
+        tw = float(m.group(4))
+        tf = float(m.group(5))
+        info["steelProfile"] = {
+            "type": "H",
+            "H": h1 if h2 is None else max(h1, h2),
+            "H1": h1,
+            "H2": h2,
+            "B": b,
+            "tw": tw,
+            "tf": tf,
+        }
+    else:
         info["steelProfile"] = "H"
-        return
-    # Pattern 3: Raw profile name starts with H + dimensions (for undecoded or English names)
-    if re.search(r'\bH\d+\s*[xX×]\s*\d+', info["name"], re.IGNORECASE):
-        info["steelProfile"] = "H"
-        return
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -765,7 +873,7 @@ class Handler(BaseHTTPRequestHandler):
             # Clean names: strip trailing :number
             for el in elements:
                 el["name"] = re.sub(r':\d+\s*$', '', el["name"])
-                if el["type"] == 'IfcBeam':
+                if el["type"] == 'IfcBeam' and not el.get('steelProfile'):
                     w, d, _ = el["size"]
                     el["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', el["name"])
 
@@ -927,7 +1035,7 @@ class Handler(BaseHTTPRequestHandler):
                             info["name"] = name_map[info["global_id"]]
                         # Clean name
                         info["name"] = re.sub(r':\d+\s*$', '', info["name"])
-                        if info["type"] == 'IfcBeam':
+                        if info["type"] == 'IfcBeam' and not info.get('steelProfile'):
                             w2, d2, _ = info["size"]
                             info["name"] = re.sub(r'\d+x\d+', f'{w2:.0f}x{d2:.0f}', info["name"])
                         batch.append(info)
