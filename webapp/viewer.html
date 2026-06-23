@@ -672,7 +672,7 @@ canvas.addEventListener('click', (e) => {
     // Phase 1 → Phase 2: hide hover dot, show rubberband
     if (hoverDot) hoverDot.visible = false;
     if (!previewBox) {
-      const geo = new THREE.BoxGeometry(1, 0.05, 1);
+      const geo = new THREE.BoxGeometry(1, 1, 1);
       previewBox = new THREE.Mesh(geo, mats.previewRect);
       previewBox.renderOrder = 998;
       scene.add(previewBox);
