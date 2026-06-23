@@ -772,8 +772,8 @@ canvas.addEventListener('mousemove', (e) => {
     if (hitRing) hitRing.visible = false;
   }
 
-  // Use ground projection as fallback for positioning
-  const refPt = gp || surfaceHit;
+  // Use model surface hit as primary reference (matches click behavior), ground as fallback
+  const refPt = surfaceHit || gp;
   if (!refPt) return;
 
   if (!pointA) {
