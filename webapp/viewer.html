@@ -115,7 +115,7 @@ input:focus,select:focus { border-color:var(--blue); }
     <div id="component-info" style="font-size:12px"></div>
     <button class="btn btn-outline btn-sm" id="btn-clear-pick" onclick="clearPick()" style="width:100%">✕ 取消选中</button>
   </div>
-  <div class="hint" id="hint">🖱 拖拽旋转 · 滚轮缩放 · 右键平移 · 点击构件查看属性 · 双击方块面对正</div>
+  <div class="hint" id="hint">🖱 中键平移 · Shift+中键旋转 · 滚轮缩放 · 左键旋转 · 点方块面正交视图 · 点边角透视视图 · ESC 退出正交</div>
 </div>
 
 <script type="importmap">
@@ -129,7 +129,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js';
-import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
 
 // ── Scene Setup ──
 const viewer = document.getElementById('viewer');
@@ -148,9 +148,15 @@ const camera = new THREE.PerspectiveCamera(50, 2, 0.1, 5000);
 camera.position.set(12, 10, 12);
 camera.lookAt(3, 2, 1.3);
 
+// 正交相机 — 用于 ViewCube 立面快照
+const orthoCamera = new THREE.OrthographicCamera(-5, 5, 5, -5, 0.1, 500);
+let useOrtho = false;
+
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(3, 2.2, 1.3);
 controls.enableDamping = true;
+// Match AutoCAD/Revit: middle=pans, shift+middle=orbits, right=dollies
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.DOLLY };
 controls.update();
 
 // Grid
@@ -177,13 +183,17 @@ pmremGen.dispose();
 
 // Materials — unified colors
 const mats = {
-  IfcBeam:   new THREE.MeshStandardMaterial({color:0x45bda4, roughness:0.5, metalness:0.1}),   // 69,189,164 青绿
-  IfcColumn: new THREE.MeshStandardMaterial({color:0xdbae1f, roughness:0.5, metalness:0.1}),   // 219,174,31 金黄
+  // Concrete / default materials
+  IfcBeam:   new THREE.MeshStandardMaterial({color:0x45bda4, roughness:0.5, metalness:0.1}),   // 69,189,164 青绿 (混凝土梁)
+  IfcColumn: new THREE.MeshStandardMaterial({color:0xdbae1f, roughness:0.5, metalness:0.1}),   // 219,174,31 金黄 (混凝土柱)
   IfcWall:   new THREE.MeshStandardMaterial({color:0xa4a1ac, roughness:0.55, metalness:0.05}), // 164,161,172 灰紫
   IfcSlab:   new THREE.MeshStandardMaterial({color:0x2f94c4, roughness:0.6, metalness:0.05}),  // 47,148,196 楼板蓝
   IfcStair: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcStairFlight: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcRailing: new THREE.MeshStandardMaterial({color:0x666666, roughness:0.4, metalness:0.3}),
+  // Steel H-beam materials — darker, more metallic
+  IfcBeam_Steel:   new THREE.MeshStandardMaterial({color:0x5c8a9e, roughness:0.3, metalness:0.55}),  // H型钢梁
+  IfcColumn_Steel: new THREE.MeshStandardMaterial({color:0xcc9520, roughness:0.3, metalness:0.55}),  // H型钢柱
   select: new THREE.MeshStandardMaterial({color:0x5599cc, roughness:0.3, emissive:0x335577, emissiveIntensity:0.2, transparent:true, opacity:0.5}),
   // Selection UX materials
   hoverDot: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.7, depthTest:false}),
@@ -222,17 +232,46 @@ outlinePass.visibleEdgeColor.set(0x3388ff);
 outlinePass.hiddenEdgeColor.set(0x2266cc);
 composer.addPass(outlinePass);
 
+// 正交模式的 composer：不带 SSAO/Bloom（它们依赖透视投影），但保留 Outline
+const orthoComposer = new EffectComposer(renderer);
+orthoComposer.addPass(new RenderPass(scene, orthoCamera));
+const orthoOutlinePass = new OutlinePass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), scene, orthoCamera
+);
+orthoOutlinePass.edgeStrength = 6;
+orthoOutlinePass.edgeGlow = 0.1;
+orthoOutlinePass.edgeThickness = 3;
+orthoOutlinePass.pulsePeriod = 0;
+orthoOutlinePass.visibleEdgeColor.set(0x3388ff);
+orthoOutlinePass.hiddenEdgeColor.set(0x2266cc);
+orthoComposer.addPass(orthoOutlinePass);
+
 let modelGroup = new THREE.Group(); scene.add(modelGroup);
 let selectBox = null;
 let hoverDot = null, previewBox = null, selectMarkers = [], gridDots = [];
 let hitMarker = null, hitRing = null;  // 3D surface hit indicators
+let snapPoints = [];  // element corner/endpoint positions for snapping
+let snapIndicator = null;  // visible snap target
+	let shiftHeld = false;  // Shift key state for Shift+Middle=Orbit (AutoCAD/Revit convention)
+
+	// ── Shift+Middle = Orbit (AutoCAD/Revit convention) ──
+	window.addEventListener('keydown', (e) => { if (e.key === 'Shift' && !e.repeat) shiftHeld = true; });
+	window.addEventListener('keyup', (e) => { if (e.key === 'Shift') { shiftHeld = false; controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN; } });
+	renderer.domElement.addEventListener('pointerdown', (e) => {
+	  if (e.button === 1 && shiftHeld) { controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE; Object.defineProperty(e, 'shiftKey', { value: false }); }
+	}, { capture: true });
+	renderer.domElement.addEventListener('pointerup', (e) => {
+	  if (e.button === 1) controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+	}, { capture: true });
+
 
 // ── Selection helpers ──
 function getGroundProjection(e) {
   const rect = canvas.getBoundingClientRect();
   const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   const my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(new THREE.Vector2(mx, my), camera);
+  const pickCam = useOrtho ? orthoCamera : camera;
+  raycaster.setFromCamera(new THREE.Vector2(mx, my), pickCam);
   const o = raycaster.ray.origin, d = raycaster.ray.direction;
   if (Math.abs(d.y) < 0.0001) return null;
   const t = -o.y / d.y;
@@ -392,10 +431,11 @@ function cleanName(el) {
 
 function addBox(cx, cy, cz, w, h, d, el) {
   const geo = new THREE.BoxGeometry(w, h, d);
-  const mat = (mats[el.type] || mats.IfcSlab).clone();
+  const matKey = el.steelProfile === 'H' ? el.type + '_Steel' : el.type;
+  const mat = (mats[matKey] || mats[el.type] || mats.IfcSlab).clone();
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(cx, cy, cz);
-  mesh.userData = { id:el.global_id, type:el.type, name: cleanName(el) };
+  mesh.userData = { id:el.global_id, type:el.type, name: cleanName(el), steelProfile: el.steelProfile || null };
   modelGroup.add(mesh);
 }
 
@@ -612,6 +652,8 @@ function renderGeometry(data) {
 
   // Show column grid reference dots
   showColumnGrid();
+  // Build snap points from all element corners/endpoints
+  buildSnapPoints();
 }
 
 // ── Column grid reference dots ──
@@ -646,6 +688,23 @@ function showColumnGrid() {
   }
 }
 
+// ── Snap points from element corners / endpoints ──
+function buildSnapPoints() {
+  snapPoints = [];
+  modelGroup.children.forEach(mesh => {
+    if (!mesh.userData || !mesh.userData.type) return;
+    if (mesh.isGroup) return;
+    const box = new THREE.Box3().setFromObject(mesh);
+    const y = box.min.y; // element bottom
+    // 4 footprint corners + center
+    snapPoints.push(new THREE.Vector3(box.min.x, y, box.min.z));
+    snapPoints.push(new THREE.Vector3(box.max.x, y, box.min.z));
+    snapPoints.push(new THREE.Vector3(box.max.x, y, box.max.z));
+    snapPoints.push(new THREE.Vector3(box.min.x, y, box.max.z));
+    snapPoints.push(new THREE.Vector3((box.min.x + box.max.x) / 2, y, (box.min.z + box.max.z) / 2));
+  });
+}
+
 // ── Selection ──
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -655,7 +714,8 @@ canvas.addEventListener('click', (e) => {
   const rect = canvas.getBoundingClientRect();
   mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
   mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
-  raycaster.setFromCamera(mouse, camera);
+  const pickCam = useOrtho ? orthoCamera : camera;
+  raycaster.setFromCamera(mouse, pickCam);
   const hits = raycaster.intersectObjects(modelGroup.children);
   if (hits.length === 0) return;
 
@@ -748,6 +808,7 @@ canvas.addEventListener('mousemove', (e) => {
     if (previewBox && previewBox.visible) previewBox.visible = false;
     if (hitMarker && hitMarker.visible) hitMarker.visible = false;
     if (hitRing && hitRing.visible) hitRing.visible = false;
+    if (snapIndicator && snapIndicator.visible) snapIndicator.visible = false;
     return;
   }
 
@@ -755,7 +816,8 @@ canvas.addEventListener('mousemove', (e) => {
   const rect = canvas.getBoundingClientRect();
   mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
+  const pickCam = useOrtho ? orthoCamera : camera;
+  raycaster.setFromCamera(mouse, pickCam);
   const modelHits = raycaster.intersectObjects(modelGroup.children, true);
   const surfaceHit = modelHits.length > 0 ? modelHits[0].point : null;
 
@@ -776,23 +838,29 @@ canvas.addEventListener('mousemove', (e) => {
   let refPt = surfaceHit || gp;
   if (!refPt) return;
 
-  // Snap to nearest column grid intersection
-  if (columnGridData && (columnGridData.colX.length || columnGridData.colY.length)) {
-    const x_mm = refPt.x * 1000;   // world X → IFC X (mm)
-    const y_mm = -refPt.z * 1000;  // world Z → -IFC Y (mm)
-    let snapX = x_mm, snapY = y_mm;
-    const THRESH = 600; // snap within 600mm
-    if (columnGridData.colX.length) {
-      let best = columnGridData.colX.reduce((a, b) => Math.abs(x_mm - a) < Math.abs(x_mm - b) ? a : b);
-      if (Math.abs(x_mm - best) < THRESH) snapX = best;
+  // Snap to nearest element corner / endpoint
+  const SNAP_R = 0.5; // 500mm snap radius in world units
+  let nearest = null, bestDist = SNAP_R;
+  for (const sp of snapPoints) {
+    const dx = refPt.x - sp.x, dz = refPt.z - sp.z;
+    const d = Math.sqrt(dx*dx + dz*dz);
+    if (d < bestDist) { bestDist = d; nearest = sp; }
+  }
+  if (nearest) {
+    refPt = nearest.clone();
+    if (!snapIndicator) {
+      snapIndicator = new THREE.Mesh(
+        new THREE.RingGeometry(0.12, 0.2, 16),
+        new THREE.MeshBasicMaterial({color: 0xff6600, transparent: true, opacity: 0.8, depthTest: false, side: THREE.DoubleSide})
+      );
+      snapIndicator.renderOrder = 999;
+      scene.add(snapIndicator);
     }
-    if (columnGridData.colY.length) {
-      let best = columnGridData.colY.reduce((a, b) => Math.abs(y_mm - a) < Math.abs(y_mm - b) ? a : b);
-      if (Math.abs(y_mm - best) < THRESH) snapY = best;
-    }
-    if (snapX !== x_mm || snapY !== y_mm) {
-      refPt = new THREE.Vector3(snapX / 1000, refPt.y, -snapY / 1000);
-    }
+    snapIndicator.position.copy(nearest);
+    snapIndicator.position.y += 0.02;
+    snapIndicator.visible = true;
+  } else {
+    if (snapIndicator) snapIndicator.visible = false;
   }
 
   if (!pointA) {
@@ -897,7 +965,7 @@ document.addEventListener('keydown', (e) => {
     selectMarkers.forEach(m => modelGroup.remove(m));
     selectMarkers = [];
     document.getElementById('select-info').textContent = '';
-    setHint('🖱 拖拽旋转 · 滚轮缩放 · 右键平移 · 点击构件查看属性');
+    setHint('🖱 中键平移 · Shift+中键旋转 · 滚轮缩放 · 左键旋转 · 点击构件查看属性');
   }
 });
 
@@ -910,6 +978,7 @@ async function addStairToScene() {
     const b = getBox(el);
     addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
   }
+  buildSnapPoints();
 }
 
 // ── Design ──
@@ -997,7 +1066,8 @@ function doComponentPick(e) {
   const rect = canvas.getBoundingClientRect();
   mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
+  const pickCam = useOrtho ? orthoCamera : camera;
+  raycaster.setFromCamera(mouse, pickCam);
   const hits = raycaster.intersectObjects(modelGroup.children, true);
   if (hits.length === 0) { clearPick(); return; }
   let mesh = hits[0].object;
@@ -1009,6 +1079,7 @@ function doComponentPick(e) {
 function selectMesh(mesh) {
   pickedMesh = mesh;
   outlinePass.selectedObjects = [mesh];
+  orthoOutlinePass.selectedObjects = [mesh];
   updateComponentPanel(mesh);
 }
 
@@ -1017,9 +1088,11 @@ function updateComponentPanel(mesh) {
   const panel = document.getElementById('component-panel');
   panel.style.display = 'block';
   const names = { IfcColumn:'柱', IfcBeam:'梁', IfcWall:'墙', IfcSlab:'楼板', IfcStair:'楼梯', IfcStairFlight:'梯段', IfcRailing:'栏杆' };
+  const steelNames = { IfcColumn:'H型钢柱', IfcBeam:'H型钢梁' };
+  const typeLabel = d.steelProfile === 'H' ? (steelNames[d.type] || names[d.type]) : names[d.type];
   const name = (d.name||'—').replace(/:\d+\s*$/g, '');
   document.getElementById('component-info').innerHTML = `
-    <span class="pill pill-blue">${names[d.type]||d.type}</span>
+    <span class="pill pill-blue">${typeLabel||d.type}</span>
     <span class="pill pill-amber" style="margin-left:4px">${d.type}</span>
     <div style="margin-top:6px;font-size:11px;color:var(--text2)">${name}</div>
     <div style="font-size:10px;color:var(--text2);word-break:break-all;margin-top:4px">ID: ${d.id||'—'}</div>`;
@@ -1027,6 +1100,7 @@ function updateComponentPanel(mesh) {
 window.clearPick = function() {
   pickedMesh = null;
   outlinePass.selectedObjects = [];
+  orthoOutlinePass.selectedObjects = [];
   document.getElementById('component-panel').style.display = 'none';
 };
 
@@ -1059,8 +1133,7 @@ function makeLabel(c, bg) {
   return new THREE.CanvasTexture(cnv);
 }
 
-// RoundedBoxGeometry — small radius for chamfered-corner look
-const cubeGeo = new RoundedBoxGeometry(1, 1, 1, 4, 0.14);
+const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
 const cubeMesh = new THREE.Mesh(cubeGeo, [
   makeLabel('右','#2e6b47'), makeLabel('左','#8b5530'),
   makeLabel('上','#3b6fb6'), makeLabel('下','#5e4a3d'),
@@ -1081,7 +1154,7 @@ const corners = [];
 for (let x = -1; x <= 1; x += 2)
   for (let y = -1; y <= 1; y += 2)
     for (let z = -1; z <= 1; z += 2) {
-      const s = new THREE.Mesh(new THREE.SphereGeometry(0.20, 8, 8), iv);
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), iv);
       s.position.set(x*0.5, y*0.5, z*0.5);
       s.userData = { kind:'corner', dir: new THREE.Vector3(x,y,z).normalize() };
       pickGroup.add(s); corners.push(s);
@@ -1110,11 +1183,9 @@ faceNormals.forEach(([nx,ny,nz]) => {
   pickGroup.add(f);
 });
 
-// Cube interaction: single click = smooth fly, double click = instant face snap
+// Cube interaction: 单击面 = 正交立面, 单击边/角 = 透视飞行
 const cubeRay = new THREE.Raycaster();
 const cubeMouse = new THREE.Vector2();
-let clickTimer = null;
-let lastFaceNormal = null;
 
 cubeCanvas.addEventListener('click', (e) => {
   const rect = cubeCanvas.getBoundingClientRect();
@@ -1122,14 +1193,24 @@ cubeCanvas.addEventListener('click', (e) => {
   cubeMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   cubeRay.setFromCamera(cubeMouse, cubeCamera);
 
-  // Detect what was hit
+  // 同时检测面、边、角，优先级：面 > 边 > 角
+  // 注意：pickGroup 里的不可见面板会拦截射线，cubeMesh 反而打不到
+  // 所以面检测用 pickGroup 里的 face 面板（userData 有精确法线）
   let hitKind = null, hitDir = null;
+  const pickHits = cubeRay.intersectObjects(pickGroup.children);
   const cHits = cubeRay.intersectObjects(corners);
-  if (cHits.length > 0) { hitKind = 'corner'; hitDir = cHits[0].object.userData.dir; }
 
+  // 面优先
+  for (const h of pickHits) {
+    if (h.object.userData.kind === 'face') {
+      hitDir = h.object.userData.dir.clone();
+      hitKind = 'face';
+      break;
+    }
+  }
+  // 边
   if (!hitKind) {
-    const allHits = cubeRay.intersectObjects(pickGroup.children);
-    for (const h of allHits) {
+    for (const h of pickHits) {
       if (h.object.userData.kind === 'edge') {
         const lp = h.object.worldToLocal(h.point.clone());
         const raw = [
@@ -1145,51 +1226,43 @@ cubeCanvas.addEventListener('click', (e) => {
       }
     }
   }
-
-  if (!hitKind) {
-    const fHits = cubeRay.intersectObjects(cubeMesh);
-    if (fHits.length > 0) {
-      // Use LOCAL face normal — always a clean cardinal direction
-      hitDir = fHits[0].face.normal.clone();
-      hitKind = 'face';
-    }
+  // 角
+  if (!hitKind && cHits.length > 0) {
+    hitDir = cHits[0].object.userData.dir;
+    hitKind = 'corner';
   }
 
   if (!hitKind) return;
 
   if (hitKind === 'face') {
-    // Double-click detection: compare LOCAL normals (never change with cube rotation)
-    const dirKey = hitDir.toArray().map(v => v.toFixed(0)).join(',');
-    if (clickTimer && lastFaceNormal === dirKey) {
-      // Double click on same face → snap instantly to pure orthogonal view
-      clearTimeout(clickTimer);
-      clickTimer = null;
-      lastFaceNormal = null;
-      snapToFace(hitDir);
-      return;
-    }
-    lastFaceNormal = dirKey;
-    clickTimer = setTimeout(() => { clickTimer = null; lastFaceNormal = null; flyToDir(hitDir); }, 300);
+    // 单击面 → 正交立面（像 Revit/Blender 那样直对屏幕）
+    snapToFace(hitDir);
   } else {
-    // Corner or edge — single click fly (directions already canonical from userData / edge math)
+    // 单击边/角 → 透视方向飞行（等轴测视角）
     flyToDir(hitDir);
   }
 });
 
-// ── Orthographic camera for flat elevation snaps ──
-const orthoCamera = new THREE.OrthographicCamera(-5, 5, 5, -5, 0.1, 500);
-let useOrtho = false;
+// ── 退出 / 进入正交模式 ──
+function exitOrtho() {
+  if (!useOrtho) return;
+  useOrtho = false;
+  // 同步透视相机到当前正交视角
+  camera.position.copy(orthoCamera.position);
+  camera.quaternion.copy(orthoCamera.quaternion);
+  camera.up.copy(orthoCamera.up);
+  const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  controls.target.copy(camera.position).addScaledVector(lookDir, 1);
+  // 把 OrbitControls 绑回透视相机
+  controls.object = camera;
+  controls.update();
+}
 
-// Switch back to perspective when user interacts
-controls.addEventListener('start', () => {
-  if (useOrtho) {
-    useOrtho = false;
-    camera.position.copy(orthoCamera.position);
-    camera.quaternion.copy(orthoCamera.quaternion);
-    camera.up.copy(orthoCamera.up);
-    const lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    controls.target.copy(camera.position).addScaledVector(lookDir, 1);
-    controls.update();
+// ESC 键退出正交模式
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && useOrtho) {
+    e.preventDefault();
+    exitOrtho();
   }
 });
 
@@ -1225,14 +1298,12 @@ function snapToFace(normal) {
   orthoCamera.far = dist * 5;
   orthoCamera.updateProjectionMatrix();
   orthoCamera.updateMatrixWorld();
-  useOrtho = true;
 
-  // Sync perspective camera
-  camera.position.copy(orthoCamera.position);
-  camera.quaternion.copy(orthoCamera.quaternion);
-  camera.up.copy(orthoCamera.up);
+  // 把 OrbitControls 切换到正交相机（旋转/平移/缩放都作用在正交相机上）
   controls.target.copy(center);
+  controls.object = orthoCamera;
   controls.update();
+  useOrtho = true;
 }
 
 // ── Fly animation ──
@@ -1247,6 +1318,8 @@ function getModelInfo() {
 }
 
 function flyToDir(dir) {
+  // 边/角飞行回到透视图
+  if (useOrtho) exitOrtho();
   const { center, dist } = getModelInfo();
   flyTarget = {
     pos: new THREE.Vector3(center.x + dir.x * dist, center.y + dir.y * dist, center.z + dir.z * dist),
@@ -1260,6 +1333,8 @@ function resize() {
   renderer.setSize(w, h);
   composer.setSize(w, h);
   outlinePass.setSize(w, h);
+  orthoComposer.setSize(w, h);
+  orthoOutlinePass.setSize(w, h);
   camera.aspect = w/h;
   camera.updateProjectionMatrix();
   if (useOrtho) {
@@ -1290,15 +1365,24 @@ function animate() {
 
   if (useOrtho) {
     controls.update();
-    renderer.render(scene, orthoCamera);
+    orthoComposer.render();
   } else {
     controls.update();
     composer.render();
   }
 
   // Sync & render ViewCube
-  cubeMesh.quaternion.copy(camera.quaternion);
-  edgeLine.quaternion.copy(camera.quaternion);
+  // 固定 cube（世界对齐），让 cubeCamera 从与主相机相同的方向看它
+  const activeCam = useOrtho ? orthoCamera : camera;
+  const viewDir = new THREE.Vector3().subVectors(activeCam.position, controls.target).normalize();
+  cubeCamera.position.copy(viewDir).multiplyScalar(2.2);
+  // 顶/底视图时调整 up 避免 singularity
+  cubeCamera.up.set(0, 1, 0);
+  if (Math.abs(viewDir.y) > 0.99) cubeCamera.up.set(0, 0, viewDir.y > 0 ? -1 : 1);
+  cubeCamera.lookAt(0, 0, 0);
+  // 正交模式时边框高亮蓝色，透视模式恢复默认
+  edgeLine.material.color.set(useOrtho ? 0x3b82f6 : 0xdddddd);
+  edgeLine.material.opacity = useOrtho ? 0.8 : 0.45;
   cubeRenderer.render(cubeScene, cubeCamera);
 }
 animate();

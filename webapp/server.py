@@ -649,7 +649,29 @@ def _process_element(e, settings, opening_to_wall):
         info["size"] = [sx_w, sy_w, sz_w]
     # Strip trailing :number for all element types (e.g. "混凝土墙_300mm:485346" → "混凝土墙_300mm")
     info["name"] = re.sub(r':\d+$', '', info["name"])
+    # ── Detect H-shaped steel beams/columns from name ──
+    _detect_steel_profile(info)
     return info
+
+
+def _detect_steel_profile(info):
+    """Detect if an element is H-shaped steel from its name, and set info['steelProfile']."""
+    if info["type"] not in ('IfcBeam', 'IfcColumn'):
+        return
+    decoded = _decode_ifc_text(info["name"])
+    # Pattern 1: Chinese name contains H型钢 / H形钢 (covers 热轧H型钢, 变截面H型钢, etc.)
+    if 'H型钢' in decoded or 'H形钢' in decoded:
+        info["steelProfile"] = "H"
+        return
+    # Pattern 2: Name segment starts with H followed by dimensions (e.g. "H500X200X8X10", "H(600/450)X220X6X12")
+    # Match :H(... or standalone Hddd pattern in the name
+    if re.search(r'(?:^|:)H[\(（]?\d+', decoded, re.IGNORECASE):
+        info["steelProfile"] = "H"
+        return
+    # Pattern 3: Raw profile name starts with H + dimensions (for undecoded or English names)
+    if re.search(r'\bH\d+\s*[xX×]\s*\d+', info["name"], re.IGNORECASE):
+        info["steelProfile"] = "H"
+        return
 
 
 class Handler(BaseHTTPRequestHandler):
