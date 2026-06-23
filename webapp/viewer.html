@@ -665,7 +665,7 @@ canvas.addEventListener('click', (e) => {
   if (!pointA) {
     pointA = pt;
     const floorH = (geoData?.floorHeight || 4500) / 1000;
-    showSelectMarker(hit.x, floorH, hit.z); // place at top corner of the 3D box
+    showSelectMarker(hit.x, hit.z, floorH); // top corner of 3D box: X=hit.x, Y=floorH, Z=hit.z
     setHint(`角1: (${pt[0]}, ${pt[1]})mm — 请点击对角点（移动鼠标可预览范围）`);
     document.getElementById('select-info').innerHTML = `<span class="pill pill-blue">📍 角1: ${pt[0]}, ${pt[1]}mm</span>`;
     // Phase 1 → Phase 2: hide hover dot, show rubberband
@@ -680,7 +680,7 @@ canvas.addEventListener('click', (e) => {
   } else {
     pointB = pt;
     const floorH = (geoData?.floorHeight || 4500) / 1000;
-    showSelectMarker(hit.x, floorH, hit.z); // place at top corner of the 3D box
+    showSelectMarker(hit.x, hit.z, floorH); // top corner of 3D box: X=hit.x, Y=floorH, Z=hit.z
     stairwellDefined = true;
     selectMode = false;
     canvas.style.cursor = '';
