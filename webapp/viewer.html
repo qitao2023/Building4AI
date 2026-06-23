@@ -463,6 +463,12 @@ function addBox(cx, cy, cz, w, h, d, el) {
       const rotM = new THREE.Matrix4();
       rotM.fromArray(el.matrix);
       rotM.setPosition(0, 0, 0);
+      // Convert IFC coords → Three.js coords: IFC(X,Y,Z)→Three.js(X,Z,-Y)
+      const e = rotM.elements;
+      for (let ci = 0; ci < 3; ci++) {
+        const b = ci * 4, y = e[b + 1], z = e[b + 2];
+        e[b + 1] = z; e[b + 2] = -y;
+      }
       geo.applyMatrix4(rotM.clone().multiply(R));  // R then rotM
     } else {
       if (el.type === 'IfcColumn') {
