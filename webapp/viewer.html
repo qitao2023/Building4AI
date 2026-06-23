@@ -185,6 +185,12 @@ const mats = {
   IfcStairFlight: new THREE.MeshStandardMaterial({color:0xddb040, roughness:0.5, metalness:0.05}),
   IfcRailing: new THREE.MeshStandardMaterial({color:0x666666, roughness:0.4, metalness:0.3}),
   select: new THREE.MeshStandardMaterial({color:0x5599cc, roughness:0.3, emissive:0x335577, emissiveIntensity:0.2, transparent:true, opacity:0.5}),
+  // Selection UX materials
+  hoverDot: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.7, depthTest:false}),
+  previewRect: new THREE.MeshBasicMaterial({color:0x5599cc, transparent:true, opacity:0.22, depthTest:false, side:THREE.DoubleSide}),
+  cornerMarker: new THREE.MeshBasicMaterial({color:0x00ff88, depthTest:false}),
+  cornerRing: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.45, depthTest:false, side:THREE.DoubleSide}),
+  gridDot: new THREE.MeshBasicMaterial({color:0x889999, transparent:true, opacity:0.5, depthTest:false}),
 };
 
 // ── Post Processing ──
@@ -216,11 +222,26 @@ composer.addPass(outlinePass);
 
 let modelGroup = new THREE.Group(); scene.add(modelGroup);
 let selectBox = null;
+let hoverDot = null, previewBox = null, selectMarkers = [], gridDots = [];
+
+// ── Selection helpers ──
+function getGroundProjection(e) {
+  const rect = canvas.getBoundingClientRect();
+  const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  const my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(new THREE.Vector2(mx, my), camera);
+  const o = raycaster.ray.origin, d = raycaster.ray.direction;
+  if (Math.abs(d.y) < 0.0001) return null;
+  const t = -o.y / d.y;
+  if (t <= 0) return null;
+  return new THREE.Vector3(o.x + t * d.x, 0.01, o.z + t * d.z);
+}
 
 // ── Load IFC geometry from server ──
 const API = 'http://localhost:8765';
 let geoData = null;
 let selectMode = false, pointA = null, pointB = null, stairwellDefined = false;
+let columnGridData = null;  // {colX: number[], colY: number[]} from analyze result
 
 async function loadGeometry() {
   showProgress();
@@ -585,6 +606,41 @@ function renderGeometry(data) {
   controls.target.copy(center);
   camera.position.set(center.x+8, center.y+8, center.z+8);
   controls.update();
+
+  // Show column grid reference dots
+  showColumnGrid();
+}
+
+// ── Column grid reference dots ──
+function showColumnGrid() {
+  // Remove old grid dots
+  gridDots.forEach(d => modelGroup.remove(d));
+  gridDots = [];
+  if (!columnGridData || (!columnGridData.colX.length && !columnGridData.colY.length)) return;
+
+  const dotGeo = new THREE.SphereGeometry(0.08, 6, 6);
+  const pts = [];
+  // Generate all intersection points on the ground plane
+  const xs = columnGridData.colX.length > 0 ? columnGridData.colX :
+    Array.from({length: 5}, (_, i) => i * 6000); // fallback if only Y known
+  const ys = columnGridData.colY.length > 0 ? columnGridData.colY :
+    Array.from({length: 5}, (_, i) => i * 6000); // fallback if only X known
+  for (const cx of xs) {
+    for (const cy of ys) {
+      pts.push([cx / 1000, -cy / 1000]); // world X, world Z
+    }
+  }
+  // Cap at 200 dots to avoid performance issues
+  const maxDots = 200;
+  const step = Math.max(1, Math.ceil(pts.length / maxDots));
+  for (let i = 0; i < pts.length; i += step) {
+    const [wx, wz] = pts[i];
+    const dot = new THREE.Mesh(dotGeo, mats.gridDot);
+    dot.position.set(wx, 0.012, wz);
+    dot.renderOrder = 996;
+    modelGroup.add(dot);
+    gridDots.push(dot);
+  }
 }
 
 // ── Selection ──
@@ -606,12 +662,26 @@ canvas.addEventListener('click', (e) => {
   if (!pointA) {
     pointA = pt;
     showSelectMarker(hit.x, hit.y, hit.z);
-    setHint(`角1: (${pt[0]}, ${pt[1]})mm — 现在点对角`);
+    setHint(`角1: (${pt[0]}, ${pt[1]})mm — 请点击对角点（移动鼠标可预览范围）`);
+    document.getElementById('select-info').innerHTML = `<span class="pill pill-blue">📍 角1: ${pt[0]}, ${pt[1]}mm</span>`;
+    // Phase 1 → Phase 2: hide hover dot, show rubberband
+    if (hoverDot) hoverDot.visible = false;
+    if (!previewBox) {
+      const geo = new THREE.BoxGeometry(1, 0.05, 1);
+      previewBox = new THREE.Mesh(geo, mats.previewRect);
+      previewBox.renderOrder = 998;
+      scene.add(previewBox);
+    }
+    previewBox.visible = true;
   } else {
     pointB = pt;
     showSelectMarker(hit.x, hit.y, hit.z);
     stairwellDefined = true;
     selectMode = false;
+    canvas.style.cursor = '';
+    // Hide hover/preview elements
+    if (hoverDot) hoverDot.visible = false;
+    if (previewBox) previewBox.visible = false;
     const len = Math.abs(pointB[0]-pointA[0]);
     const wid = Math.abs(pointB[1]-pointA[1]);
     document.getElementById('v-length').textContent = len;
@@ -620,19 +690,27 @@ canvas.addEventListener('click', (e) => {
     document.getElementById('stairwell-section').style.display = 'block';
     document.getElementById('btn-design').disabled = false;
     document.getElementById('select-info').innerHTML = `<span class="pill pill-green">✅ ${len}×${wid}mm</span>`;
-    setHint('楼梯间已选定，点击 AI 设计');
-    // Draw selection rectangle
+    setHint('楼梯间已选定 — 点击「AI 设计楼梯」开始生成');
     drawSelectRect(pointA, pointB);
   }
 });
 
 function showSelectMarker(x, y, z) {
+  const group = new THREE.Group();
   const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.15, 16, 16),
-    new THREE.MeshBasicMaterial({color:0x00ff88})
+    new THREE.SphereGeometry(0.25, 16, 16),
+    mats.cornerMarker
   );
-  dot.position.set(x, z, y);
-  modelGroup.add(dot);
+  group.add(dot);
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.35, 0.06, 8, 24),
+    mats.cornerRing
+  );
+  group.add(ring);
+  group.position.set(x, z, y);
+  group.renderOrder = 999;
+  modelGroup.add(group);
+  selectMarkers.push(group);
 }
 
 function drawSelectRect(a, b) {
@@ -645,13 +723,64 @@ function drawSelectRect(a, b) {
   modelGroup.add(selectBox);
 }
 
+// ── Live hover preview + rubberband during selection ──
+canvas.addEventListener('mousemove', (e) => {
+  if (!selectMode) {
+    if (hoverDot && hoverDot.visible) hoverDot.visible = false;
+    if (previewBox && previewBox.visible) previewBox.visible = false;
+    return;
+  }
+  const gp = getGroundProjection(e);
+  if (!gp) return;
+
+  if (!pointA) {
+    // Phase 1: show ground hover indicator
+    if (hoverDot) {
+      hoverDot.position.copy(gp);
+      hoverDot.visible = true;
+    }
+  } else {
+    // Phase 2: rubberband preview from pointA to current ground position
+    if (hoverDot) hoverDot.visible = false;
+    if (previewBox) {
+      const mx = gp.x * 1000, mz = gp.z * 1000;
+      const cx = (pointA[0] + mx) / 2000, cz = (pointA[1] + mz) / 2000;
+      const sx = Math.abs(mx - pointA[0]) / 1000, sz = Math.abs(mz - pointA[1]) / 1000;
+      previewBox.scale.set(sx || 0.05, 1, sz || 0.05);
+      previewBox.position.set(cx, 0.03, cz);
+      previewBox.visible = true;
+      // Update live dimension in hint
+      const liveLen = Math.abs(mx - pointA[0]);
+      const liveWid = Math.abs(mz - pointA[1]);
+      setHint(`角1: (${pointA[0]}, ${pointA[1]})mm — 当前: ${liveLen}×${liveWid}mm — 点击确认对角`);
+    }
+  }
+});
+
 function setHint(msg) { document.getElementById('hint').textContent = msg; }
 
 window.startSelect = function() {
   selectMode = true; pointA = null; pointB = null;
   if (selectBox) { modelGroup.remove(selectBox); selectBox = null; }
-  document.getElementById('select-info').textContent = '请点击第一个角...';
-  setHint('点击三维模型中的楼梯间角落');
+  // Clean up previous markers
+  selectMarkers.forEach(m => modelGroup.remove(m));
+  selectMarkers = [];
+  // Clean up old preview/selection state
+  if (previewBox) { previewBox.visible = false; }
+  if (hoverDot) hoverDot.visible = false;
+  // Set crosshair cursor
+  canvas.style.cursor = 'crosshair';
+  document.getElementById('select-info').textContent = '请点击楼梯间的第一个角点...';
+  setHint('🖱 点击三维模型中楼梯间的第一个角点（移动鼠标可预览地面位置）');
+  // Create or show hover indicator
+  if (!hoverDot) {
+    const ringGeo = new THREE.RingGeometry(0.08, 0.18, 32);
+    ringGeo.rotateX(-Math.PI / 2);
+    hoverDot = new THREE.Mesh(ringGeo, mats.hoverDot);
+    hoverDot.renderOrder = 997;
+    scene.add(hoverDot);
+  }
+  hoverDot.visible = true;
 };
 
 // ── Design ──
@@ -708,6 +837,14 @@ document.getElementById('fu').addEventListener('change', async function() {
   const resp = await fetch(API+'/api/analyze', { method:'POST', body:fd });
   const analyzeResult = await resp.json();
   document.getElementById('file-info').textContent = analyzeResult.file || f.name;
+  // Store column grid data for reference dots
+  if (analyzeResult.columnGridX && analyzeResult.columnGridY) {
+    const parseGrid = (s) => s.split(' / ').map(Number).filter(n => !isNaN(n));
+    columnGridData = {
+      colX: analyzeResult.columnGridX !== '未检测' ? parseGrid(analyzeResult.columnGridX) : [],
+      colY: analyzeResult.columnGridY !== '未检测' ? parseGrid(analyzeResult.columnGridY) : []
+    };
+  }
   loadGeometryStream();
 });
 
