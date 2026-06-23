@@ -646,6 +646,18 @@ def _process_element(e, settings, opening_to_wall):
             info["size"] = [sx_w, sz_w, sy_w]
         info["pos"] = [cx_w, cy_w, cz_min]
         # Note: name dimension replacement moved to _geometry() paths with steelProfile guard
+        # Detect rotation: check if matrix columns are axis-aligned
+        # If all 3 basis vectors align with world axes → axis-aligned (skip rotM)
+        # If any basis vector is tilted → truly rotated (apply rotM for slope)
+        m = info.get("matrix", [])
+        if len(m) >= 12:
+            aligned = True
+            for ci in (0, 4, 8):
+                ax = max(abs(m[ci]), abs(m[ci+1]), abs(m[ci+2]))
+                if ax < 0.95:
+                    aligned = False
+                    break
+            info["isRotated"] = not aligned
     elif info["type"] == 'IfcOpeningElement':
         sp = sorted([sx_w, sy_w, sz_w])
         info["size"] = [sp[0], sp[2], sp[1]]
@@ -654,7 +666,7 @@ def _process_element(e, settings, opening_to_wall):
         info["parent_wall"] = opening_to_wall.get(e.GlobalId)
     elif info["type"] == 'IfcSlab':
         info["pos"] = [cx_w, cy_w, cz_min]
-        info["size"] = [sx_w, sy_w, max(sz_w, 150)]
+        info["size"] = [sx_w, sy_w, max(sz_w, 1)]  # use actual thickness, min 1mm
     else:
         info["pos"] = [cx_w, cy_w, cz_min]
         info["size"] = [sx_w, sy_w, sz_w]

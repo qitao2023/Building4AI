@@ -438,7 +438,6 @@ function addBox(cx, cy, cz, w, h, d, el) {
   let geo;
 
   if (sp && typeof sp === 'object' && (sp.type === 'H' || sp.type === 'CHS' || sp.type === 'L')) {
-    // Use max(localSize) for correct extrusion depth on rotated elements
     const localDepth = el.localSize
       ? Math.max(...el.localSize) / 1000
       : (el.type === 'IfcColumn' ? h : (el.dir === 'y' ? d : w));
@@ -452,11 +451,25 @@ function addBox(cx, cy, cz, w, h, d, el) {
       geo = makeSteelExtrusion(sp, localDepth);
     }
 
-    // Standard orientation rotation (same as makeSteelGeometry)
-    if (el.type === 'IfcColumn') {
-      geo.rotateX(-Math.PI / 2);       // cross-section horizontal, extrusion up
-    } else if (el.dir !== 'y') {
-      geo.rotateY(Math.PI / 2);        // cross-section vertical, extrusion along X
+    // Orientation: rotated beams use R×rotM combined; others use standard rotation
+    if (el.isRotated && el.matrix && el.type !== 'IfcColumn') {
+      // R: align extrusion Z → max local axis (beam length direction)
+      const R = new THREE.Matrix4();
+      if (el.localSize) {
+        const ls = el.localSize, maxI = ls.indexOf(Math.max(...ls));
+        if (maxI === 0) R.makeRotationY(Math.PI / 2);      // Z→X
+        else if (maxI === 1) R.makeRotationX(-Math.PI / 2); // Z→Y
+      }
+      const rotM = new THREE.Matrix4();
+      rotM.fromArray(el.matrix);
+      rotM.setPosition(0, 0, 0);
+      geo.applyMatrix4(rotM.clone().multiply(R));  // R then rotM
+    } else {
+      if (el.type === 'IfcColumn') {
+        geo.rotateX(-Math.PI / 2);
+      } else if (el.dir !== 'y') {
+        geo.rotateY(Math.PI / 2);
+      }
     }
 
     // Center
