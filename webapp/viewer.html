@@ -664,8 +664,9 @@ canvas.addEventListener('click', (e) => {
 
   if (!pointA) {
     pointA = pt;
-    const floorH = (geoData?.floorHeight || 4500) / 1000;
-    showSelectMarker(hit.x, hit.z, floorH); // top corner of 3D box: X=hit.x, Y=floorH, Z=hit.z
+    const groundY = getModelGroundY();
+    const topY = groundY + (geoData?.floorHeight || 4500) / 1000;
+    showSelectMarker(hit.x, hit.z, topY); // top corner of 3D box
     setHint(`角1: (${pt[0]}, ${pt[1]})mm — 请点击对角点（移动鼠标可预览范围）`);
     document.getElementById('select-info').innerHTML = `<span class="pill pill-blue">📍 角1: ${pt[0]}, ${pt[1]}mm</span>`;
     // Phase 1 → Phase 2: hide hover dot, show rubberband
@@ -679,8 +680,9 @@ canvas.addEventListener('click', (e) => {
     previewBox.visible = true;
   } else {
     pointB = pt;
-    const floorH = (geoData?.floorHeight || 4500) / 1000;
-    showSelectMarker(hit.x, hit.z, floorH); // top corner of 3D box: X=hit.x, Y=floorH, Z=hit.z
+    const groundY = getModelGroundY();
+    const topY = groundY + (geoData?.floorHeight || 4500) / 1000;
+    showSelectMarker(hit.x, hit.z, topY); // top corner of 3D box
     stairwellDefined = true;
     selectMode = false;
     canvas.style.cursor = '';
@@ -720,13 +722,23 @@ function showSelectMarker(x, y, z) {
 
 function drawSelectRect(a, b) {
   if (selectBox) modelGroup.remove(selectBox);
+  const groundY = getModelGroundY();
   const floorH = (geoData?.floorHeight || 4500) / 1000; // mm → meters, full story height
   const cx = (a[0]+b[0])/2000, cz = (a[1]+b[1])/2000;
   const sx = Math.abs(b[0]-a[0])/1000, sy = Math.abs(b[1]-a[1])/1000;
   const geo = new THREE.BoxGeometry(sx||0.1, floorH, sy||0.1);
   selectBox = new THREE.Mesh(geo, mats.select);
-  selectBox.position.set(cx, floorH / 2, cz);
+  selectBox.position.set(cx, groundY + floorH / 2, cz);
   modelGroup.add(selectBox);
+}
+
+// Get real ground level from model elements (not helper objects)
+function getModelGroundY() {
+  const box = new THREE.Box3();
+  modelGroup.children.forEach(c => {
+    if (c.userData && c.userData.type) box.expandByObject(c);
+  });
+  return box.isEmpty() ? 0 : box.min.y;
 }
 
 // ── Live hover preview + rubberband during selection ──
@@ -779,12 +791,13 @@ canvas.addEventListener('mousemove', (e) => {
     // Phase 2: full-height rubberband preview
     if (hoverDot) hoverDot.visible = false;
     if (previewBox) {
+      const groundY = getModelGroundY();
       const floorH = (geoData?.floorHeight || 4500) / 1000;
       const mx = refPt.x * 1000, mz = refPt.z * 1000;
       const cx = (pointA[0] + mx) / 2000, cz = (pointA[1] + mz) / 2000;
       const sx = Math.abs(mx - pointA[0]) / 1000, sz = Math.abs(mz - pointA[1]) / 1000;
       previewBox.scale.set(sx || 0.05, floorH, sz || 0.05);
-      previewBox.position.set(cx, floorH / 2, cz);
+      previewBox.position.set(cx, groundY + floorH / 2, cz);
       previewBox.visible = true;
       const liveLen = Math.abs(mx - pointA[0]);
       const liveWid = Math.abs(mz - pointA[1]);
