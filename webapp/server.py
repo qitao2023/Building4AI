@@ -602,6 +602,19 @@ def _process_element(e, settings, opening_to_wall):
         return None  # skip entities without valid geometry
     verts = list(shape.geometry.verts)
     m4 = shape.transformation.matrix
+    # Save the full 4×4 transformation matrix (column-major, 16 floats) for the frontend
+    # This preserves rotation/orientation for elements that aren't axis-aligned
+    info["matrix"] = [float(x) for x in m4]  # 16-element column-major 4×4 matrix
+    # Compute local bbox (before transformation) for correct extrusion depth
+    lx_v, ly_v, lz_v = [], [], []
+    for i in range(0, len(verts), 3):
+        lx_v.append(verts[i]); ly_v.append(verts[i+1]); lz_v.append(verts[i+2])
+    info["localSize"] = [
+        round((max(lx_v) - min(lx_v)) * 1000),
+        round((max(ly_v) - min(ly_v)) * 1000),
+        round((max(lz_v) - min(lz_v)) * 1000),
+    ]
+    # World-space vertices (for bbox computation)
     xs, ys, zs = [], [], []
     for i in range(0, len(verts), 3):
         lx, ly, lz = verts[i], verts[i+1], verts[i+2]
@@ -721,6 +734,25 @@ def _detect_steel_profile(info):
             info["steelProfile"] = {"type": "CHS", "D": D, "t": t}
         else:
             info["steelProfile"] = "CHS"
+        return
+
+    # ── Angle steel (角钢 / LdimXdim) ──
+    if '角钢' in decoded:
+        # Parse L90x6 (equal-leg) or L100x63x8 (unequal-leg)
+        m = re.search(r'\bL(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)(?:\s*[xX×]\s*(\d+(?:\.\d+)?))?', decoded, re.IGNORECASE)
+        if not m:
+            m = re.search(r'\bL(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)(?:\s*[xX×]\s*(\d+(?:\.\d+)?))?', info["name"], re.IGNORECASE)
+        if m:
+            b1 = float(m.group(1))
+            if m.group(3):  # unequal-leg: LB1xB2xt
+                b2 = float(m.group(2))
+                t  = float(m.group(3))
+            else:           # equal-leg: LBxt
+                b2 = b1
+                t  = float(m.group(2))
+            info["steelProfile"] = {"type": "L", "B1": b1, "B2": b2, "t": t}
+        else:
+            info["steelProfile"] = "L"
         return
 
     # ── I-beam (工字钢) — standard sections from GB/T 706 lookup table ──

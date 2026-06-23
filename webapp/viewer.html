@@ -431,15 +431,43 @@ function cleanName(el) {
 
 function addBox(cx, cy, cz, w, h, d, el) {
   const sp = el.steelProfile;
+  const isSteel = sp && (sp === 'H' || sp === 'CHS' || sp === 'L' || (typeof sp === 'object' && sp.type));
+  const matKey = isSteel ? el.type + '_Steel' : el.type;
+  const mat = (mats[matKey] || mats[el.type] || mats.IfcSlab).clone();
+
   let geo;
-  if (sp && typeof sp === 'object' && (sp.type === 'H' || sp.type === 'CHS')) {
-    geo = makeSteelGeometry(el, w, h, d, sp);
+
+  if (sp && typeof sp === 'object' && (sp.type === 'H' || sp.type === 'CHS' || sp.type === 'L')) {
+    // Use max(localSize) for correct extrusion depth on rotated elements
+    const localDepth = el.localSize
+      ? Math.max(...el.localSize) / 1000
+      : (el.type === 'IfcColumn' ? h : (el.dir === 'y' ? d : w));
+    const isTapered = sp.H2 && sp.H1 !== sp.H2;
+
+    if (isTapered) {
+      const H1m = sp.H1 / 1000, H2m = sp.H2 / 1000;
+      const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
+      geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, localDepth);
+    } else {
+      geo = makeSteelExtrusion(sp, localDepth);
+    }
+
+    // Standard orientation rotation (same as makeSteelGeometry)
+    if (el.type === 'IfcColumn') {
+      geo.rotateX(-Math.PI / 2);       // cross-section horizontal, extrusion up
+    } else if (el.dir !== 'y') {
+      geo.rotateY(Math.PI / 2);        // cross-section vertical, extrusion along X
+    }
+
+    // Center
+    geo.computeBoundingBox();
+    const center = new THREE.Vector3();
+    geo.boundingBox.getCenter(center);
+    geo.translate(-center.x, -center.y, -center.z);
   } else {
     geo = new THREE.BoxGeometry(w, h, d);
   }
-  const isSteel = sp && (sp === 'H' || sp === 'CHS' || (typeof sp === 'object' && sp.type));
-  const matKey = isSteel ? el.type + '_Steel' : el.type;
-  const mat = (mats[matKey] || mats[el.type] || mats.IfcSlab).clone();
+
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(cx, cy, cz);
   mesh.userData = { id:el.global_id, type:el.type, name: cleanName(el), steelProfile: sp || null };
@@ -447,30 +475,18 @@ function addBox(cx, cy, cz, w, h, d, el) {
 }
 
 function createHShape(B, H, tw, tf) {
-  // 2D H-shaped cross-section in XY plane: B=width(X), H=height(Y)
   const hB = B / 2, hH = H / 2, htw = tw / 2;
   const shape = new THREE.Shape();
-  shape.moveTo(-hB, -hH);           // bottom-left
-  shape.lineTo( hB, -hH);           // bottom-right
-  shape.lineTo( hB, -hH + tf);      // up flange
-  shape.lineTo( htw, -hH + tf);     // in to web
-  shape.lineTo( htw,  hH - tf);     // up web
-  shape.lineTo( hB,  hH - tf);      // out to flange
-  shape.lineTo( hB,  hH);           // up to top
-  shape.lineTo(-hB,  hH);           // left across top
-  shape.lineTo(-hB,  hH - tf);      // down flange
-  shape.lineTo(-htw, hH - tf);      // in to web
-  shape.lineTo(-htw,-hH + tf);      // down web
-  shape.lineTo(-hB, -hH + tf);      // out to flange
+  shape.moveTo(-hB, -hH); shape.lineTo( hB, -hH); shape.lineTo( hB, -hH + tf);
+  shape.lineTo( htw, -hH + tf); shape.lineTo( htw,  hH - tf); shape.lineTo( hB,  hH - tf);
+  shape.lineTo( hB,  hH); shape.lineTo(-hB,  hH); shape.lineTo(-hB,  hH - tf);
+  shape.lineTo(-htw, hH - tf); shape.lineTo(-htw,-hH + tf); shape.lineTo(-hB, -hH + tf);
   shape.closePath();
   return shape;
 }
 
 function createCHSShape(D, t) {
-  // Circular ring cross-section (hollow tube) in XY plane
-  // D = outer diameter (mm converted to m before calling), t = wall thickness (m)
-  const outerR = D / 2;
-  const innerR = Math.max(outerR - t, 0.001);  // prevent zero/negative inner radius
+  const outerR = D / 2, innerR = Math.max(outerR - t, 0.001);
   const shape = new THREE.Shape();
   shape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
   const hole = new THREE.Path();
@@ -479,40 +495,115 @@ function createCHSShape(D, t) {
   return shape;
 }
 
-function makeSteelGeometry(el, w, h, d, sp) {
-  // Convert mm→m: profile params are in mm, geometry in m
+function createLShape(B1, B2, t) {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0); shape.lineTo(B1, 0); shape.lineTo(B1, t);
+  shape.lineTo(t, t); shape.lineTo(t, B2); shape.lineTo(0, B2);
+  shape.closePath();
+  return shape;
+}
+
+function makeSteelExtrusion(sp, depth) {
+  // Create a steel cross-section shape in XY and extrude along Z (no rotation/centering)
+  // sp params in mm; convert to m; depth already in meters
   let shape;
   if (sp.type === 'CHS') {
     shape = createCHSShape(sp.D / 1000, sp.t / 1000);
+  } else if (sp.type === 'L') {
+    shape = createLShape(sp.B1 / 1000, sp.B2 / 1000, sp.t / 1000);
   } else {
-    // H-beam (default)
     shape = createHShape(sp.B / 1000, sp.H / 1000, sp.tw / 1000, sp.tf / 1000);
   }
+  return new THREE.ExtrudeGeometry(shape, { steps: 1, depth: depth, bevelEnabled: false });
+}
 
+function makeSteelGeometry(el, w, h, d, sp) {
+  // Non-matrix path: create extrusion, rotate for orientation, center for bbox positioning
   let extrudeDepth;
-  if (el.type === 'IfcColumn') {
-    extrudeDepth = h;  // column height
-  } else if (el.dir === 'y') {
-    extrudeDepth = d;  // beam along Z
+  if (el.type === 'IfcColumn') { extrudeDepth = h; }
+  else if (el.dir === 'y') { extrudeDepth = d; }
+  else { extrudeDepth = w; }
+
+  let geo;
+  const isTapered = sp.H2 && sp.H1 !== sp.H2;
+  if (isTapered) {
+    const H1m = sp.H1 / 1000, H2m = sp.H2 / 1000;
+    const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
+    geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, extrudeDepth);
   } else {
-    extrudeDepth = w;  // beam along X (default)
+    geo = makeSteelExtrusion(sp, extrudeDepth);
   }
 
-  const geo = new THREE.ExtrudeGeometry(shape, { steps: 1, depth: extrudeDepth, bevelEnabled: false });
-
-  // Rotate so extrusion axis aligns with element orientation
   if (el.type === 'IfcColumn') {
-    geo.rotateX(-Math.PI / 2);      // cross-section horizontal, extrusion vertical (Y)
+    geo.rotateX(-Math.PI / 2);
   } else if (el.dir !== 'y') {
-    geo.rotateY(Math.PI / 2);       // cross-section vertical (YZ), extrusion along X
+    geo.rotateY(Math.PI / 2);
   }
-  // Beam along Z (dir='y'): no rotation — extrusion already along Z
 
-  // Center the geometry
   geo.computeBoundingBox();
   const center = new THREE.Vector3();
   geo.boundingBox.getCenter(center);
   geo.translate(-center.x, -center.y, -center.z);
+  return geo;
+}
+
+function createTaperedHGeometry(H1, H2, B, tw, tf, length) {
+  // All in meters. H1=large end height, H2=small end height
+  // Creates H-shape cross-section at z=0 (large) and z=length (small) with side faces + end caps
+  const hB = B / 2, htw = tw / 2;
+
+  // 12 outline vertices (x,y,z triplets) for one H-shape end
+  function ov(Hh, zPos) {
+    const hH = Hh / 2;
+    return [
+       hB, -hH, zPos,         // 0: bottom-right
+      -hB, -hH, zPos,         // 1: bottom-left
+      -hB, -hH + tf, zPos,    // 2: b.flange left-top
+      -htw,-hH + tf, zPos,    // 3: web left-bottom
+      -htw, hH - tf, zPos,    // 4: web left-top
+      -hB,  hH - tf, zPos,    // 5: t.flange left-bottom
+      -hB,  hH, zPos,         // 6: top-left
+       hB,  hH, zPos,         // 7: top-right
+       hB,  hH - tf, zPos,    // 8: t.flange right-bottom
+       htw, hH - tf, zPos,    // 9: web right-top
+       htw,-hH + tf, zPos,    // 10: web right-bottom
+       hB, -hH + tf, zPos,    // 11: b.flange right-top
+    ];
+  }
+
+  const N = 12;
+  const v1 = ov(H1, 0);
+  const v2 = ov(H2, length);
+
+  const positions = new Float32Array([...v1, ...v2]);
+  const indices = [];
+
+  // ── Side faces: quads connecting each edge of the two outlines ──
+  for (let i = 0; i < N; i++) {
+    const next = (i + 1) % N;
+    indices.push(i, next, next + N, i, next + N, i + N);
+  }
+
+  // ── Large end cap (z=0, normal -Z): 3 rectangles = 6 triangles ──
+  // Bottom flange: verts 0,1,2,11
+  indices.push(0, 1, 11, 1, 2, 11);
+  // Web: verts 3,4,9,10
+  indices.push(3, 4, 10, 4, 9, 10);
+  // Top flange: verts 5,6,7,8
+  indices.push(5, 6, 8, 6, 7, 8);
+
+  // ── Small end cap (z=length, normal +Z): 3 rectangles = 6 triangles ──
+  // Bottom flange: verts 12..15, 23
+  indices.push(12, 23, 13, 23, 14, 13);
+  // Web: verts 15,16,21,22
+  indices.push(22, 21, 16, 22, 16, 15);
+  // Top flange: verts 17..20
+  indices.push(17, 20, 19, 17, 19, 18);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
   return geo;
 }
 
@@ -1168,6 +1259,7 @@ function updateComponentPanel(mesh) {
   const steelLabels = {
     H:   { IfcColumn:'H型钢柱',  IfcBeam:'H型钢梁' },
     CHS: { IfcColumn:'圆管钢柱', IfcBeam:'圆管钢梁' },
+    L:   { IfcColumn:'角钢柱',   IfcBeam:'角钢梁' },
   };
   const sp = d.steelProfile;
   const spType = (sp && typeof sp === 'object') ? sp.type : sp;
