@@ -191,6 +191,8 @@ const mats = {
   cornerMarker: new THREE.MeshBasicMaterial({color:0x00ff88, depthTest:false}),
   cornerRing: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.45, depthTest:false, side:THREE.DoubleSide}),
   gridDot: new THREE.MeshBasicMaterial({color:0x889999, transparent:true, opacity:0.5, depthTest:false}),
+  hitMarker: new THREE.MeshBasicMaterial({color:0x00ff88, depthTest:false}),
+  hitRing: new THREE.MeshBasicMaterial({color:0x00ff88, transparent:true, opacity:0.5, depthTest:false, side:THREE.DoubleSide}),
 };
 
 // ── Post Processing ──
@@ -223,6 +225,7 @@ composer.addPass(outlinePass);
 let modelGroup = new THREE.Group(); scene.add(modelGroup);
 let selectBox = null;
 let hoverDot = null, previewBox = null, selectMarkers = [], gridDots = [];
+let hitMarker = null, hitRing = null;  // 3D surface hit indicators
 
 // ── Selection helpers ──
 function getGroundProjection(e) {
@@ -715,11 +718,12 @@ function showSelectMarker(x, y, z) {
 
 function drawSelectRect(a, b) {
   if (selectBox) modelGroup.remove(selectBox);
+  const floorH = (geoData?.floorHeight || 4500) / 1000; // mm → meters, full story height
   const cx = (a[0]+b[0])/2000, cz = (a[1]+b[1])/2000;
   const sx = Math.abs(b[0]-a[0])/1000, sy = Math.abs(b[1]-a[1])/1000;
-  const geo = new THREE.BoxGeometry(sx||0.1, 0.05, sy||0.1);
+  const geo = new THREE.BoxGeometry(sx||0.1, floorH, sy||0.1);
   selectBox = new THREE.Mesh(geo, mats.select);
-  selectBox.position.set(cx, 0.02, cz);
+  selectBox.position.set(cx, floorH / 2, cz);
   modelGroup.add(selectBox);
 }
 
@@ -728,28 +732,58 @@ canvas.addEventListener('mousemove', (e) => {
   if (!selectMode) {
     if (hoverDot && hoverDot.visible) hoverDot.visible = false;
     if (previewBox && previewBox.visible) previewBox.visible = false;
+    if (hitMarker && hitMarker.visible) hitMarker.visible = false;
+    if (hitRing && hitRing.visible) hitRing.visible = false;
     return;
   }
+
+  // 1. Raycast against model surface for 3D hit marker
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const modelHits = raycaster.intersectObjects(modelGroup.children, true);
+  const surfaceHit = modelHits.length > 0 ? modelHits[0].point : null;
+
+  // 2. Ground projection for rubberband reference
   const gp = getGroundProjection(e);
-  if (!gp) return;
+
+  // 3. Show/hide 3D surface hit marker
+  if (surfaceHit && hitMarker) {
+    hitMarker.position.copy(surfaceHit);
+    hitMarker.visible = true;
+    if (hitRing) { hitRing.position.copy(surfaceHit); hitRing.visible = true; }
+  } else if (hitMarker) {
+    hitMarker.visible = false;
+    if (hitRing) hitRing.visible = false;
+  }
+
+  // Use ground projection as fallback for positioning
+  const refPt = gp || surfaceHit;
+  if (!refPt) return;
 
   if (!pointA) {
-    // Phase 1: show ground hover indicator
-    if (hoverDot) {
+    // Phase 1: ground hover ring + surface hint
+    if (hoverDot && gp) {
       hoverDot.position.copy(gp);
       hoverDot.visible = true;
+    } else if (hoverDot) {
+      hoverDot.visible = false;
+    }
+    if (surfaceHit) {
+      setHint(`构件表面: (${Math.round(surfaceHit.x*1000)}, ${Math.round(surfaceHit.z*1000)})mm — 点击选择角点`);
     }
   } else {
-    // Phase 2: rubberband preview from pointA to current ground position
+    // Phase 2: full-height rubberband preview
     if (hoverDot) hoverDot.visible = false;
     if (previewBox) {
-      const mx = gp.x * 1000, mz = gp.z * 1000;
+      const floorH = (geoData?.floorHeight || 4500) / 1000;
+      const mx = refPt.x * 1000, mz = refPt.z * 1000;
       const cx = (pointA[0] + mx) / 2000, cz = (pointA[1] + mz) / 2000;
       const sx = Math.abs(mx - pointA[0]) / 1000, sz = Math.abs(mz - pointA[1]) / 1000;
-      previewBox.scale.set(sx || 0.05, 1, sz || 0.05);
-      previewBox.position.set(cx, 0.03, cz);
+      previewBox.scale.set(sx || 0.05, floorH, sz || 0.05);
+      previewBox.position.set(cx, floorH / 2, cz);
       previewBox.visible = true;
-      // Update live dimension in hint
       const liveLen = Math.abs(mx - pointA[0]);
       const liveWid = Math.abs(mz - pointA[1]);
       setHint(`角1: (${pointA[0]}, ${pointA[1]})mm — 当前: ${liveLen}×${liveWid}mm — 点击确认对角`);
@@ -772,6 +806,25 @@ window.startSelect = function() {
   canvas.style.cursor = 'crosshair';
   document.getElementById('select-info').textContent = '请点击楼梯间的第一个角点...';
   setHint('🖱 点击三维模型中楼梯间的第一个角点（移动鼠标可预览地面位置）');
+  // Create or show 3D hit markers (once)
+  if (!hitMarker) {
+    hitMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.2, 12, 12),
+      mats.hitMarker
+    );
+    hitMarker.renderOrder = 998;
+    hitMarker.visible = false;
+    scene.add(hitMarker);
+  }
+  if (!hitRing) {
+    hitRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.28, 0.05, 8, 16),
+      mats.hitRing
+    );
+    hitRing.renderOrder = 997;
+    hitRing.visible = false;
+    scene.add(hitRing);
+  }
   // Create or show hover indicator
   if (!hoverDot) {
     const ringGeo = new THREE.RingGeometry(0.08, 0.18, 32);
