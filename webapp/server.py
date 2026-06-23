@@ -452,10 +452,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition","attachment; filename=stair_design.ifc"); self.end_headers()
         with open(path,"rb") as f: self.wfile.write(f.read())
     def do_OPTIONS(self): self.send_response(200); self._cors(); self.end_headers()
+    def _static(self, path):
+        """Serve static files from webapp directory."""
+        import os as _os, mimetypes as _mt
+        safe = path.lstrip('/').split('?')[0] or 'index.html'
+        fp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), safe)
+        if not _os.path.isfile(fp):
+            return self._json({"error":"not found"}, 404)
+        self.send_response(200); self._cors()
+        ct = _mt.guess_type(fp)[0] or 'application/octet-stream'
+        self.send_header("Content-Type", ct)
+        if ct.startswith('text/') or ct in ('application/javascript','application/json'):
+            self.send_header("Content-Type", ct+"; charset=utf-8")
+        self.end_headers()
+        with open(fp, 'rb') as f:
+            self.wfile.write(f.read())
+
     def do_GET(self):
         if self.path=="/api/health": return self._json({"status":"ok","version":"0.5"})
         if self.path=="/api/geometry": return self._geometry()
-        self._json({"error":"not found"},404)
+        if self.path.startswith("/api/"): return self._json({"error":"not found"},404)
+        return self._static(self.path)
 
     def do_POST(self):
         if self.path=="/api/analyze": return self._analyze()
