@@ -685,6 +685,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=="/api/health": return self._json({"status":"ok","version":"0.7.0"})
         if self.path=="/api/geometry": return self._geometry()
         if self.path=="/api/geometry/stream": return self._geometry_stream()
+        if self.path=="/api/stair-overlay": return self._stair_overlay()
         if self.path.startswith("/api/"): return self._json({"error":"not found"},404)
         return self._static(self.path)
 
@@ -695,6 +696,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error":"not found"},404)
 
     _geom_cache = None  # class-level cache for geometry (cleared on new upload)
+
+    def _stair_overlay(self):
+        """Return only the stair overlay mesh elements (for incremental rendering after design)."""
+        if not LAST_STAIR_DESIGN:
+            return self._json({"elements": []})
+        sd = LAST_STAIR_DESIGN
+        stair_els = build_stair_mesh_elements(
+            sd["flights"], sd["landings"], sd["stairwell"],
+            sd["sw_mm"], sd["well_w"])
+        return self._json({"elements": stair_els})
 
     def _geometry(self):
         global LAST_IFC, LAST_IFC_MODEL, LAST_IFC_CONTEXT, LAST_STAIR_DESIGN

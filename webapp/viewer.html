@@ -882,6 +882,17 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ── Incremental stair rendering ──
+async function addStairToScene() {
+  const resp = await fetch(API + '/api/stair-overlay');
+  const data = await resp.json();
+  if (!data.elements || !data.elements.length) return;
+  for (const el of data.elements) {
+    const b = getBox(el);
+    addBox(b.cx, b.cy, b.cz, b.w, b.h, b.d, el);
+  }
+}
+
 // ── Design ──
 window.doDesign = async function() {
   if (!stairwellDefined) return alert('请先框选楼梯间');
@@ -912,11 +923,10 @@ window.doDesign = async function() {
     document.getElementById('btn-download').style.display = 'block';
     window._lastDesign = { flights:d.design.flights, landings:d.design.landings, railings:d.design.railings, stairwell:payload.stairwell, width_mm:d.design.flights[0] ? (d.design.flights[0].riser * 0 + 1200) : 1200 };
 
-    // Also render stair geometry
+    // Also render stair geometry (incremental — no full reload)
     const sr = await fetch(API+'/api/generate-ifc', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...window._lastDesign, stairwell_width_mm:wid}) });
     if (sr.ok) {
-      // Reload geometry with streaming (stair overlay included)
-      await loadGeometryStream();
+      await addStairToScene();
     }
   } catch(e) { st.textContent = '❌ '+e.message; }
   btn.disabled = false;
