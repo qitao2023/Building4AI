@@ -851,6 +851,37 @@ window.startSelect = function() {
   hoverDot.visible = true;
 };
 
+// ── ESC to cancel selection ──
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !selectMode) return;
+  e.preventDefault();
+  if (pointA) {
+    // Phase 2 → back to Phase 1
+    pointA = null;
+    if (previewBox) previewBox.visible = false;
+    if (hoverDot) hoverDot.visible = true;
+    // Remove first marker
+    if (selectMarkers.length > 0) {
+      const m = selectMarkers.pop();
+      modelGroup.remove(m);
+    }
+    document.getElementById('select-info').textContent = '请点击楼梯间的第一个角点...';
+    setHint('🖱 已取消对角选择 — 点击三维模型中的楼梯间角落');
+  } else {
+    // Phase 1 → exit select mode
+    selectMode = false;
+    canvas.style.cursor = '';
+    if (previewBox) previewBox.visible = false;
+    if (hoverDot) hoverDot.visible = false;
+    if (hitMarker) hitMarker.visible = false;
+    if (hitRing) hitRing.visible = false;
+    selectMarkers.forEach(m => modelGroup.remove(m));
+    selectMarkers = [];
+    document.getElementById('select-info').textContent = '';
+    setHint('🖱 拖拽旋转 · 滚轮缩放 · 右键平移 · 点击构件查看属性');
+  }
+});
+
 // ── Design ──
 window.doDesign = async function() {
   if (!stairwellDefined) return alert('请先框选楼梯间');
