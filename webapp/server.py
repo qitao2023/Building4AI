@@ -335,6 +335,11 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
     y_margin = (well_w_mm - sw_mm) // 2  # left margin for centering stair in well
     # Step left edge = y_margin, step center = well_w_mm/2
 
+    # Absolute position of stairwell in the building (from user's box-select)
+    origin_x = stairwell.get("origin_x", 0)
+    origin_y = stairwell.get("origin_y", 0)
+    ox = origin_x; oy = origin_y
+
     # Collect all new elements for batch spatial containment
     _stair_elements = []
 
@@ -345,7 +350,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
         _stair_elements.append(slab)
         ll=ld.get("l",1200); lw=ld.get("w",well_w_mm); lt=ld.get("t",150); el=ld.get("el",0)
         x_off = x0 if "楼层" in ld.get("name","") else x0 + fl1
-        mk_place(slab, x_off, 0, el)
+        mk_place(slab, ox + x_off, oy, el)
         add_geom(slab, ll, lw, lt)
 
     # Flight 1 steps
@@ -355,7 +360,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F1')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
             _stair_elements.append(step)
-            mk_place(step, x0 + s*td, y_margin, s*rh)
+            mk_place(step, ox + x0 + s*td, oy + y_margin, s*rh)
             add_geom(step, td, sw_mm, rh)
 
     # Flight 2 steps
@@ -366,7 +371,7 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
             step = run("root.create_entity", model, ifc_class="IfcStairFlight", name=f"{f.get('name','F2')}_s{s+1}")
             run("aggregate.assign_object", model, products=[step], relating_object=stair)
             _stair_elements.append(step)
-            mk_place(step, x0 + sx-(s+1)*td, y_margin, mid_el+s*rh)
+            mk_place(step, ox + x0 + sx-(s+1)*td, oy + y_margin, mid_el+s*rh)
             add_geom(step, td, sw_mm, rh)
 
     # Railings
@@ -380,12 +385,12 @@ def generate_stair_ifc(base_ifc_path, flights_data, landings_data, stairwell, sw
                 post=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Post_{fi}_{side}_{si}")
                 run("aggregate.assign_object",model,products=[post],relating_object=stair)
                 _stair_elements.append(post)
-                mk_place(post,px-20,sy-20,pz); add_geom(post,40,40,900)
+                mk_place(post,ox+px-20,oy+sy-20,pz); add_geom(post,40,40,900)
             fp=sx+xdir*td//2; lp=sx+xdir*(n-1)*td+xdir*td//2
             rail=run("root.create_entity",model,ifc_class="IfcRailing",name=f"Rail_{fi}_{side}")
             run("aggregate.assign_object",model,products=[rail],relating_object=stair)
             _stair_elements.append(rail)
-            mk_place(rail,min(fp,lp),sy-20,sz+(n//2)*rh_s+900)
+            mk_place(rail,ox+min(fp,lp),oy+sy-20,sz+(n//2)*rh_s+900)
             add_geom(rail,abs(lp-fp)+40,40,40)
 
     # Batch spatial containment: all stair elements belong to the storey
@@ -414,6 +419,11 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
     y_margin = (well_w_mm - sw_mm) // 2
     y_center = well_w_mm // 2  # center of stairwell = center of stair
 
+    # Absolute position of stairwell in the building (from user's box-select)
+    origin_x = stairwell.get("origin_x", 0)
+    origin_y = stairwell.get("origin_y", 0)
+    ox = origin_x; oy = origin_y
+
     # ── Landings (fill full stairwell width, start at Y=0) ──
     for ld in landings:
         ll = ld.get("l", 1200)
@@ -426,7 +436,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
             "global_id": f"stair_landing_{ld.get('name','')}",
             "name": ld.get("name", "Landing"),
             "type": "IfcSlab",
-            "pos": [round(x_off + ll/2), round(y_center), round(el)],
+            "pos": [round(ox + x_off + ll/2), round(oy + y_center), round(el)],
             "size": [round(ll), round(lw), max(round(lt), 150)],
             "color": "#aabbcc"
         })
@@ -439,7 +449,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                 "global_id": f"stair_F1_s{s+1}",
                 "name": f"{f.get('name','F1')}_s{s+1}",
                 "type": "IfcStairFlight",
-                "pos": [round(x0 + s*td + td/2), round(y_center), round(s*rh)],
+                "pos": [round(ox + x0 + s*td + td/2), round(oy + y_center), round(s*rh)],
                 "size": [round(td), round(sw_mm), round(rh)],
                 "color": "#c8d6e5"
             })
@@ -453,7 +463,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                 "global_id": f"stair_F2_s{s+1}",
                 "name": f"{f.get('name','F2')}_s{s+1}",
                 "type": "IfcStairFlight",
-                "pos": [round(x0 + sx - (s+1)*td + td/2), round(y_center), round(fh1 + s*rh)],
+                "pos": [round(ox + x0 + sx - (s+1)*td + td/2), round(oy + y_center), round(fh1 + s*rh)],
                 "size": [round(td), round(sw_mm), round(rh)],
                 "color": "#d6e0f0"
             })
@@ -474,7 +484,7 @@ def build_stair_mesh_elements(flights, landings, stairwell, sw_mm, well_w_mm):
                     "global_id": f"stair_post_{fi}_{side}_{si}",
                     "name": f"Post_F{fi+1}_{side}_{si}",
                     "type": "IfcRailing",
-                    "pos": [round(px), round(y_margin + sy_off), round(pz)],
+                    "pos": [round(ox + px), round(oy + y_margin + sy_off), round(pz)],
                     "size": [40, 40, 900],
                     "color": "#888888"
                 })

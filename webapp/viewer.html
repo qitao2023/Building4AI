@@ -860,8 +860,11 @@ window.doDesign = async function() {
   const len = Math.abs(pointB[0]-pointA[0]);
   const wid = Math.abs(pointB[1]-pointA[1]);
   const h = geoData.floorHeight || 4500;
+  // Stairwell absolute position in IFC coords (world X → IFC X, world Z → -IFC Y)
+  const ox = Math.min(pointA[0], pointB[0]);          // IFC X origin
+  const oy = -Math.max(pointA[1], pointB[1]);          // IFC Y origin
   const payload = {
-    stairwell: { length_mm:len, width_mm:wid, floor_height_mm:h, beam_top:h-50, beam_depth:400 },
+    stairwell: { length_mm:len, width_mm:wid, floor_height_mm:h, beam_top:h-50, beam_depth:400, origin_x:ox, origin_y:oy },
     api_key: document.getElementById('key-inp').value,
     model: document.getElementById('model-sel').value
   };
