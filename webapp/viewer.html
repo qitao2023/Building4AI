@@ -644,12 +644,16 @@ function getBox(el) {
     cx = mx; cy = my + h / 2; cz = mz;
   } else if (el.type === 'IfcBeam' || el.type === 'IfcWall' || el.type === 'IfcOpeningElement') {
     let bw = sx / 1000, bh = sy / 1000, bl = sz / 1000;
-    // Steel beams: use actual profile height instead of bbox Z span (which includes slope)
+    // Steel beams: use actual profile height if bbox Z span is close to profile
+    // (horizontal/sloped beams), but keep bbox span for vertical beams (where Z span = length)
     const sp3 = el.steelProfile;
     if (sp3 && typeof sp3 === 'object') {
-      if (sp3.type === 'H') bh = (sp3.H || sp3.H1 || 0) / 1000;
-      else if (sp3.type === 'CHS') bh = (sp3.D || 0) / 1000;
-      else if (sp3.type === 'L') bh = (Math.max(sp3.B1 || 0, sp3.B2 || 0)) / 1000;
+      let profH = 0;
+      if (sp3.type === 'H') profH = (sp3.H || sp3.H1 || 0) / 1000;
+      else if (sp3.type === 'CHS') profH = (sp3.D || 0) / 1000;
+      else if (sp3.type === 'L') profH = (Math.max(sp3.B1 || 0, sp3.B2 || 0)) / 1000;
+      // Only use profile height if bbox Z span is not dominated by beam length (vertical)
+      if (profH > 0 && bh < profH * 3) bh = profH;
     }
     if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + bh / 2; cz = mz; }
     else             { w = bl; h = bh; d = bw; cx = mx; cy = my + bh / 2; cz = mz; }
