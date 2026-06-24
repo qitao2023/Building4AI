@@ -444,7 +444,8 @@ function addBox(cx, cy, cz, w, h, d, el) {
     const isTapered = sp.H2 && sp.H1 !== sp.H2;
 
     if (isTapered) {
-      const H1m = sp.H1 / 1000, H2m = sp.H2 / 1000;
+      const flipH = el.bodyZY !== undefined && el.bodyZY < 0;
+      const H1m = (flipH ? sp.H2 : sp.H1) / 1000, H2m = (flipH ? sp.H1 : sp.H2) / 1000;
       const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
       geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, localDepth);
     } else {
@@ -551,7 +552,8 @@ function makeSteelGeometry(el, w, h, d, sp) {
   let geo;
   const isTapered = sp.H2 && sp.H1 !== sp.H2;
   if (isTapered) {
-    const H1m = sp.H1 / 1000, H2m = sp.H2 / 1000;
+    const flipH = el.bodyZY !== undefined && el.bodyZY < 0;
+    const H1m = (flipH ? sp.H2 : sp.H1) / 1000, H2m = (flipH ? sp.H1 : sp.H2) / 1000;
     const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
     geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, extrudeDepth);
   } else {
