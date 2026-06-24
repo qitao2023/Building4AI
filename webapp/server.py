@@ -658,6 +658,8 @@ def _process_element(e, settings, opening_to_wall):
                     aligned = False
                     break
             info["isRotated"] = not aligned
+    # Detect taper flip: body Z Y sign determines which end is large
+    info["bodyZY"] = m[9]  # column 2 Y component (IFC coords)
     elif info["type"] == 'IfcOpeningElement':
         sp = sorted([sx_w, sy_w, sz_w])
         info["size"] = [sp[0], sp[2], sp[1]]
