@@ -614,6 +614,8 @@ def _process_element(e, settings, opening_to_wall):
         round((max(ly_v) - min(ly_v)) * 1000),
         round((max(lz_v) - min(lz_v)) * 1000),
     ]
+    # Extrusion axis min coordinate (for tapered beam coordinate alignment)
+    info["extrusionMin"] = [round(min(lx_v)*1000), round(min(ly_v)*1000), round(min(lz_v)*1000)]
     # World-space vertices (for bbox computation)
     xs, ys, zs = [], [], []
     for i in range(0, len(verts), 3):
@@ -675,7 +677,7 @@ def _process_element(e, settings, opening_to_wall):
     # Strip trailing :number for all element types (e.g. "混凝土墙_300mm:485346" → "混凝土墙_300mm")
     info["name"] = re.sub(r':\d+$', '', info["name"])
     # ── Detect H-shaped steel beams/columns from name ──
-    _detect_steel_profile(info)
+    _detect_steel_profile(info, e)
     return info
 
 
@@ -731,7 +733,42 @@ _I_BEAM_TABLE = {
 }
 
 
-def _detect_steel_profile(info):
+def _extract_ifc_circular_profile(entity):
+    """Extract circular profile (D, t in mm) from IFC geometry.
+    Traverses MappedItems (shared geometry) and direct ExtrudedAreaSolids.
+    Returns (D, t) or (None, None)."""
+    try:
+        rep = entity.Representation
+        if not rep:
+            return (None, None)
+        for r in rep.Representations or []:
+            for item in r.Items or []:
+                swept_areas = []
+                if item.is_a('IfcExtrudedAreaSolid'):
+                    swept_areas = [item.SweptArea]
+                elif item.is_a('IfcMappedItem'):
+                    ms = getattr(item, 'MappingSource', None)
+                    if ms:
+                        mp = getattr(ms, 'MappedRepresentation', None)
+                        if mp:
+                            for mp_item in mp.Items or []:
+                                sa = getattr(mp_item, 'SweptArea', None)
+                                if sa:
+                                    swept_areas.append(sa)
+                # Search for hollow profile first (gives both D and t)
+                for sw in swept_areas:
+                    if sw.is_a('IfcCircleHollowProfileDef'):
+                        return (sw.Radius * 2, sw.WallThickness)
+                # Fallback to solid circle profile
+                for sw in swept_areas:
+                    if sw.is_a('IfcCircleProfileDef'):
+                        return (sw.Radius * 2, None)
+    except Exception:
+        pass
+    return (None, None)
+
+
+def _detect_steel_profile(info, entity=None):
     """Detect steel profile type from element name, and parse profile params.
     Sets info['steelProfile'] = {'type':'H', 'H':..., 'B':..., ...} or {'type':'CHS','D':...,'t':...}
     or just a type string if params cannot be parsed."""
@@ -739,13 +776,23 @@ def _detect_steel_profile(info):
         return
     decoded = _decode_ifc_text(info["name"])
 
-    # ── Circular Hollow Section (圆管 / ΦDxt) ──
-    if '圆管' in decoded or re.search(r'[Φϕ][\d.]+', decoded):
+    # ── Circular Hollow Section (圆管 / ΦDxt / 圆形 / 钢管混凝土柱) ──
+    is_circular = ('圆管' in decoded or '圆形' in decoded or '圓形' in decoded
+                   or re.search(r'[Φϕ][\d.]+', decoded)
+                   or ('钢管混凝土' in decoded and '圆' in decoded))
+    if is_circular:
         m = re.search(r'[Φϕ]?(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)', decoded)
         if m:
             D = float(m.group(1))
             t = float(m.group(2))
             info["steelProfile"] = {"type": "CHS", "D": D, "t": t}
+        elif entity is not None:
+            # Extract D/t from IFC geometry (handles MappedItems)
+            D, t = _extract_ifc_circular_profile(entity)
+            if D is not None:
+                info["steelProfile"] = {"type": "CHS", "D": D, "t": t or 4.0}
+            else:
+                info["steelProfile"] = "CHS"
         else:
             info["steelProfile"] = "CHS"
         return

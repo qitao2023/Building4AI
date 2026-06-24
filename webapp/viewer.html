@@ -444,8 +444,7 @@ function addBox(cx, cy, cz, w, h, d, el) {
     const isTapered = sp.H2 && sp.H1 !== sp.H2;
 
     if (isTapered) {
-      const flipH = el.bodyZY !== undefined && el.bodyZY < 0;
-      const H1m = (flipH ? sp.H2 : sp.H1) / 1000, H2m = (flipH ? sp.H1 : sp.H2) / 1000;
+      const H1m = sp.H1 / 1000, H2m = sp.H2 / 1000;
       const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
       geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, localDepth);
     } else {
@@ -460,6 +459,11 @@ function addBox(cx, cy, cz, w, h, d, el) {
         const ls = el.localSize, maxI = ls.indexOf(Math.max(...ls));
         if (maxI === 0) R.makeRotationY(Math.PI / 2);      // Z→X
         else if (maxI === 1) R.makeRotationX(-Math.PI / 2); // Z→Y
+      }
+      // Translate geometry to align with IFC body coordinate range
+      if (isTapered && el.extrusionMin) {
+        const ls = el.localSize, maxI = ls.indexOf(Math.max(...ls));
+        geo.translate(0, 0, el.extrusionMin[maxI] / 1000);  // mm→m, shift along Z
       }
       const rotM = new THREE.Matrix4();
       rotM.fromArray(el.matrix);
@@ -547,8 +551,7 @@ function makeSteelGeometry(el, w, h, d, sp) {
   let geo;
   const isTapered = sp.H2 && sp.H1 !== sp.H2;
   if (isTapered) {
-    const flipH = el.bodyZY !== undefined && el.bodyZY < 0;
-    const H1m = (flipH ? sp.H2 : sp.H1) / 1000, H2m = (flipH ? sp.H1 : sp.H2) / 1000;
+    const H1m = sp.H1 / 1000, H2m = sp.H2 / 1000;
     const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
     geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, extrudeDepth);
   } else {
