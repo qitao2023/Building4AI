@@ -644,8 +644,11 @@ function getBox(el) {
     cx = mx; cy = my + h / 2; cz = mz;
   } else if (el.type === 'IfcBeam' || el.type === 'IfcWall' || el.type === 'IfcOpeningElement') {
     let bw = sx / 1000, bh = sy / 1000, bl = sz / 1000;
-    if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + bh / 2; cz = mz; }
-    else             { w = bl; h = bh; d = bw; cx = mx; cy = my + bh / 2; cz = mz; }
+    // Steel beams: use IFC matrix Z translation (top-of-steel, mm→m) for consistent connection alignment
+    const stlZ = el.steelProfile && el.matrix && el.matrix.length >= 16 ? el.matrix[14] / 1000 : null;
+    const my2 = stlZ != null ? stlZ : my;
+    if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my2; cz = mz; }
+    else             { w = bl; h = bh; d = bw; cx = mx; cy = my2; cz = mz; }
   } else if (el.type === 'IfcSlab' || el.type === 'IfcStair' || el.type === 'IfcStairFlight' || el.type === 'IfcRailing') {
     // Slab / Stair: flat horizontal. Size = [Xspan, Yspan, Zspan=thickness/height]
     w = sx / 1000;
