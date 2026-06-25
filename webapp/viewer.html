@@ -651,6 +651,8 @@ function getBox(el) {
     cx = mx; cy = my + h / 2; cz = mz;
   } else if (el.type === 'IfcBeam' || el.type === 'IfcWall' || el.type === 'IfcOpeningElement') {
     let bw = sx / 1000, bh = sy / 1000, bl = sz / 1000;
+    // Save original world Z span before profile correction (for tilted beam positioning)
+    const bhWorld = bh;
     // Steel beams: use actual profile height if bbox Z span is close to profile
     // (horizontal/sloped beams), but keep bbox span for vertical beams (where Z span = length)
     const sp3 = el.steelProfile;
@@ -662,8 +664,10 @@ function getBox(el) {
       // Only use profile height if bbox Z span is not dominated by beam length (vertical)
       if (profH > 0 && bh < profH * 3) bh = profH;
     }
-    if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + bh / 2; cz = mz; }
-    else             { w = bl; h = bh; d = bw; cx = mx; cy = my + bh / 2; cz = mz; }
+    // Tilted beams: position uses world Z span (includes tilt projection), not profile height
+    const posH = (el.isRotated && sp3) ? bhWorld : bh;
+    if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + posH / 2; cz = mz; }
+    else             { w = bl; h = bh; d = bw; cx = mx; cy = my + posH / 2; cz = mz; }
   } else if (el.type === 'IfcSlab' || el.type === 'IfcStair' || el.type === 'IfcStairFlight' || el.type === 'IfcRailing') {
     // Slab / Stair: flat horizontal. Size = [Xspan, Yspan, Zspan=thickness/height]
     w = sx / 1000;
