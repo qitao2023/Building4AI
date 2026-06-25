@@ -848,6 +848,10 @@ def _detect_steel_profile(info, entity=None):
             info["steelProfile"] = {"type": "CHS", "D": sx, "t": sx if is_cfst else sx * 0.02}
         return
 
+    # 组合构件（砼+型钢，非圆管）：跳过型钢截面提取，尺寸由 bbox 决定
+    if '砼' in decoded or '混凝土' in decoded:
+        return
+
     # ── Angle steel (角钢 / LdimXdim) ──
     if '角钢' in decoded:
         # Parse L90x6 (equal-leg) or L100x63x8 (unequal-leg)
@@ -937,21 +941,32 @@ def _detect_steel_profile(info, entity=None):
             "tw": tw,
             "tf": tf,
         }
-    elif entity is not None:
-        # Try to extract dimensions from IFC geometry (e.g. built-up welded H-section)
-        dims = _extract_ifc_h_profile(entity)
-        if dims:
-            info["steelProfile"] = {"type": "H", "H": dims["H"], "H1": dims["H"], "H2": dims["H"],
-                                    "B": dims["B"], "tw": dims["tw"], "tf": dims["tf"]}
+    else:
+        # "H型钢:700x300x13x24" — H和数字间有中文，H前缀正则失败，直接用 HxBxtwxtf 数字匹配
+        m2 = re.search(r'(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
+                       decoded)
+        if not m2:
+            m2 = re.search(r'(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
+                           info["name"])
+        if m2:
+            h1 = float(m2.group(1))
+            b  = float(m2.group(2))
+            tw = float(m2.group(3))
+            tf = float(m2.group(4))
+            info["steelProfile"] = {"type": "H", "H": h1, "H1": h1, "H2": h1, "B": b, "tw": tw, "tf": tf}
+        elif entity is not None:
+            dims = _extract_ifc_h_profile(entity)
+            if dims:
+                info["steelProfile"] = {"type": "H", "H": dims["H"], "H1": dims["H"], "H2": dims["H"],
+                                        "B": dims["B"], "tw": dims["tw"], "tf": dims["tf"]}
+            else:
+                sz = info.get("size", [200, 200, 6000])
+                info["steelProfile"] = {"type": "H", "H": float(sz[1]), "H1": float(sz[1]), "H2": float(sz[1]),
+                                        "B": float(sz[0]), "tw": float(sz[1]) * 0.03, "tf": float(sz[0]) * 0.05}
         else:
-            # Estimate from bounding box: bbox width≈B, height≈H
             sz = info.get("size", [200, 200, 6000])
             info["steelProfile"] = {"type": "H", "H": float(sz[1]), "H1": float(sz[1]), "H2": float(sz[1]),
                                     "B": float(sz[0]), "tw": float(sz[1]) * 0.03, "tf": float(sz[0]) * 0.05}
-    else:
-        sz = info.get("size", [200, 200, 6000])
-        info["steelProfile"] = {"type": "H", "H": float(sz[1]), "H1": float(sz[1]), "H2": float(sz[1]),
-                                "B": float(sz[0]), "tw": float(sz[1]) * 0.03, "tf": float(sz[0]) * 0.05}
 
 
 class Handler(BaseHTTPRequestHandler):
