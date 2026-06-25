@@ -11,6 +11,24 @@ from http.client import HTTPSConnection
 import ifcopenshell
 from ifcopenshell.api import run
 
+# ── Pre-compiled regex patterns (avoid re-compilation in hot loops) ──
+_RE_TRAILING_ID = re.compile(r':\d+$')
+_RE_TRAILING_ID_SP = re.compile(r':\d+\s*$')
+_RE_DIMS_IN_NAME = re.compile(r'\d+x\d+')
+# Steel profile detection regex (used in _detect_steel_profile)
+_RE_PHI = re.compile(r'[Φϕ][\d.]+')
+_RE_PIPE_DIMS = re.compile(r'[Φϕ]?(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)')
+_RE_ANGLE_L = re.compile(r'\bL(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)(?:\s*[xX×]\s*(\d+(?:\.\d+)?))?', re.IGNORECASE)
+_RE_IBEAM = re.compile(r'\b(I\d+(?:\.\d+)?[a-c]?)\b', re.IGNORECASE)
+_RE_H_PREFIX = re.compile(r'(?:^|:)H[\(（]?\d+', re.IGNORECASE)
+_RE_H_DIMS_RAW = re.compile(r'\bH\d+\s*[xX×]\s*\d+', re.IGNORECASE)
+_RE_H_PROFILE_FULL = re.compile(
+    r'H[\(（]?(\d+(?:\.\d+)?)(?:[/／](\d+(?:\.\d+)?))?[\)）]?\s*[xX×]\s*'
+    r'(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
+    re.IGNORECASE)
+_RE_H_DIMS_FALLBACK = re.compile(
+    r'(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)')
+
 PORT = 8765
 LAST_IFC = None  # stored uploaded IFC path
 LAST_IFC_MODEL = None  # cached ifcopenshell model (avoid repeated open)
@@ -583,6 +601,11 @@ def _color_from_material(mat):
 def _process_element(e, settings, opening_to_wall):
     """Process a single IFC element: tessellate geometry, compute bbox, return element info dict.
     Returns None for entities without valid geometry."""
+    # ── Fast path: skip tessellation for simple extrusions ──
+    fast_result = _try_fast_path_extrusion(e)
+    if fast_result[0] is not None:
+        return _build_info_from_bbox(fast_result[0], fast_result[1], e, opening_to_wall)
+    # ── Slow path: full tessellation ──
     import ifcopenshell.geom as geom
     info = {"global_id": e.GlobalId, "name": e.Name or "", "type": e.is_a()}
     # Normalize type name
@@ -675,9 +698,13 @@ def _process_element(e, settings, opening_to_wall):
         info["pos"] = [cx_w, cy_w, cz_min]
         info["size"] = [sx_w, sy_w, sz_w]
     # Strip trailing :number for all element types (e.g. "混凝土墙_300mm:485346" → "混凝土墙_300mm")
-    info["name"] = re.sub(r':\d+$', '', info["name"])
+    info["name"] = _RE_TRAILING_ID.sub('', info["name"])
     # ── Detect H-shaped steel beams/columns from name ──
     _detect_steel_profile(info, e)
+    # Tapered H-beams: force matrix rotation path to preserve beam slope/tilt
+    sp = info.get("steelProfile")
+    if sp and sp.get("type") == "H" and sp.get("H2") and sp["H1"] != sp["H2"]:
+        info["isRotated"] = True
     return info
 
 
@@ -820,11 +847,11 @@ def _detect_steel_profile(info, entity=None):
 
     # ── Circular Hollow Section (圆管 / ΦDxt / 圆形 / 钢管混凝土柱) ──
     is_circular = ('圆管' in decoded or '圆形' in decoded or '圓形' in decoded
-                   or re.search(r'[Φϕ][\d.]+', decoded)
+                   or _RE_PHI.search(decoded)
                    or ('钢管混凝土' in decoded and '圆' in decoded))
     if is_circular:
         is_cfst = '混凝土' in decoded
-        m = re.search(r'[Φϕ]?(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)', decoded)
+        m = _RE_PIPE_DIMS.search(decoded)
         if m:
             D = float(m.group(1))
             t = float(m.group(2))
@@ -855,9 +882,9 @@ def _detect_steel_profile(info, entity=None):
     # ── Angle steel (角钢 / LdimXdim) ──
     if '角钢' in decoded:
         # Parse L90x6 (equal-leg) or L100x63x8 (unequal-leg)
-        m = re.search(r'\bL(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)(?:\s*[xX×]\s*(\d+(?:\.\d+)?))?', decoded, re.IGNORECASE)
+        m = _RE_ANGLE_L.search(decoded)
         if not m:
-            m = re.search(r'\bL(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)(?:\s*[xX×]\s*(\d+(?:\.\d+)?))?', info["name"], re.IGNORECASE)
+            m = _RE_ANGLE_L.search(info["name"])
         if m:
             b1 = float(m.group(1))
             if m.group(3):  # unequal-leg: LB1xB2xt
@@ -875,10 +902,10 @@ def _detect_steel_profile(info, entity=None):
 
     # ── I-beam (工字钢) — standard sections from GB/T 706 lookup table ──
     if '工字钢' in decoded:
-        m = re.search(r'\b(I\d+(?:\.\d+)?[a-c]?)\b', decoded, re.IGNORECASE)
+        m = _RE_IBEAM.search(decoded)
         if not m:
             # Also try raw name
-            m = re.search(r'\b(I\d+(?:\.\d+)?[a-c]?)\b', info["name"], re.IGNORECASE)
+            m = _RE_IBEAM.search(info["name"])
         if m:
             key = m.group(1).upper()
             # Try case-insensitive lookup
@@ -911,20 +938,18 @@ def _detect_steel_profile(info, entity=None):
     is_h_steel = False
     if 'H型钢' in decoded or 'H形钢' in decoded:
         is_h_steel = True
-    elif re.search(r'(?:^|:)H[\(（]?\d+', decoded, re.IGNORECASE):
+    elif _RE_H_PREFIX.search(decoded):
         is_h_steel = True
-    elif re.search(r'\bH\d+\s*[xX×]\s*\d+', info["name"], re.IGNORECASE):
+    elif _RE_H_DIMS_RAW.search(info["name"]):
         is_h_steel = True
 
     if not is_h_steel:
         return
 
     # Parse H profile dimensions: H(H1/H2)XBXtwXtf or HHeightXBXtwXtf
-    m = re.search(r'H[\(（]?(\d+(?:\.\d+)?)(?:[/／](\d+(?:\.\d+)?))?[\)）]?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
-                  decoded, re.IGNORECASE)
+    m = _RE_H_PROFILE_FULL.search(decoded)
     if not m:
-        m = re.search(r'H[\(（]?(\d+(?:\.\d+)?)(?:[/／](\d+(?:\.\d+)?))?[\)）]?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
-                      info["name"], re.IGNORECASE)
+        m = _RE_H_PROFILE_FULL.search(info["name"])
 
     if m:
         h1 = float(m.group(1))
@@ -943,11 +968,9 @@ def _detect_steel_profile(info, entity=None):
         }
     else:
         # "H型钢:700x300x13x24" — H和数字间有中文，H前缀正则失败，直接用 HxBxtwxtf 数字匹配
-        m2 = re.search(r'(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
-                       decoded)
+        m2 = _RE_H_DIMS_FALLBACK.search(decoded)
         if not m2:
-            m2 = re.search(r'(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)',
-                           info["name"])
+            m2 = _RE_H_DIMS_FALLBACK.search(info["name"])
         if m2:
             h1 = float(m2.group(1))
             b  = float(m2.group(2))
@@ -967,6 +990,262 @@ def _detect_steel_profile(info, entity=None):
             sz = info.get("size", [200, 200, 6000])
             info["steelProfile"] = {"type": "H", "H": float(sz[1]), "H1": float(sz[1]), "H2": float(sz[1]),
                                     "B": float(sz[0]), "tw": float(sz[1]) * 0.03, "tf": float(sz[0]) * 0.05}
+
+
+# ═══════════════════════════════ Fast-Path Geometry (skip tessellation) ══
+
+def _mat4_mul(A, B):
+    """Multiply two 4×4 matrices (list-of-lists)."""
+    return [[sum(A[i][k] * B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+def _placement_to_mat4(placement):
+    """Recursively build 4×4 world-space matrix from IfcLocalPlacement chain.
+    Returns list-of-lists in row-major order. Coordinates in file-native units (mm)."""
+    if placement is None:
+        return [[1.,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    parent = _placement_to_mat4(getattr(placement, 'PlacementRelTo', None))
+    rp = placement.RelativePlacement
+    loc = [float(x) for x in rp.Location.Coordinates]
+    # Z axis
+    zx, zy, zz = 0.0, 0.0, 1.0
+    if hasattr(rp, 'Axis') and rp.Axis:
+        zx, zy, zz = (float(x) for x in rp.Axis.DirectionRatios)
+    # X axis (RefDirection)
+    xx, xy, xz = 1.0, 0.0, 0.0
+    if hasattr(rp, 'RefDirection') and rp.RefDirection:
+        xx, xy, xz = (float(x) for x in rp.RefDirection.DirectionRatios)
+    # Gram-Schmidt: X' = X - (X·Z)Z
+    dot = xx*zx + xy*zy + xz*zz
+    xx, xy, xz = xx - dot*zx, xy - dot*zy, xz - dot*zz
+    n = (xx*xx + xy*xy + xz*xz) ** 0.5
+    if n > 1e-10:
+        xx, xy, xz = xx/n, xy/n, xz/n
+    # Y = Z × X
+    yx = zy*xz - zz*xy
+    yy = zz*xx - zx*xz
+    yz = zx*xy - zy*xx
+    local = [
+        [xx, yx, zx, loc[0]],
+        [xy, yy, zy, loc[1]],
+        [xz, yz, zz, loc[2]],
+        [0., 0., 0., 1.],
+    ]
+    return _mat4_mul(parent, local)
+
+def _compute_world_matrix(entity):
+    """Compute 4×4 world-space transformation matrix from ObjectPlacement chain.
+    Returns 16-element column-major list (translations in meters), or None."""
+    op = getattr(entity, 'ObjectPlacement', None)
+    if not op:
+        return None
+    try:
+        M = _placement_to_mat4(op)
+        # Convert translation from mm → meters (matching create_shape() convention)
+        M[0][3] /= 1000.0
+        M[1][3] /= 1000.0
+        M[2][3] /= 1000.0
+        # Convert row-major → column-major flat list (16 floats)
+        return [
+            float(M[0][0]), float(M[1][0]), float(M[2][0]), 0.0,
+            float(M[0][1]), float(M[1][1]), float(M[2][1]), 0.0,
+            float(M[0][2]), float(M[1][2]), float(M[2][2]), 0.0,
+            float(M[0][3]), float(M[1][3]), float(M[2][3]), 1.0,
+        ]
+    except Exception:
+        return None
+
+def _extrusion_pos_axes(pos):
+    """Extract 3×3 rotation matrix columns from an IfcAxis2Placement3D.
+    Returns (x_axis, y_axis, z_axis) as tuples of 3 floats, or None."""
+    z_axis = (0.0, 0.0, 1.0)
+    x_axis = (1.0, 0.0, 0.0)
+    if hasattr(pos, 'Axis') and pos.Axis:
+        z_axis = tuple(float(x) for x in pos.Axis.DirectionRatios)
+    if hasattr(pos, 'RefDirection') and pos.RefDirection:
+        x_axis = tuple(float(x) for x in pos.RefDirection.DirectionRatios)
+    # Gram-Schmidt: remove Z component from X
+    dot = x_axis[0]*z_axis[0] + x_axis[1]*z_axis[1] + x_axis[2]*z_axis[2]
+    x_axis = (x_axis[0] - dot*z_axis[0], x_axis[1] - dot*z_axis[1], x_axis[2] - dot*z_axis[2])
+    n = (x_axis[0]**2 + x_axis[1]**2 + x_axis[2]**2) ** 0.5
+    if n > 1e-10:
+        x_axis = (x_axis[0]/n, x_axis[1]/n, x_axis[2]/n)
+    # Y = Z × X
+    y_axis = (
+        z_axis[1]*x_axis[2] - z_axis[2]*x_axis[1],
+        z_axis[2]*x_axis[0] - z_axis[0]*x_axis[2],
+        z_axis[0]*x_axis[1] - z_axis[1]*x_axis[0],
+    )
+    return (x_axis, y_axis, z_axis)
+
+def _try_fast_path_extrusion(entity):
+    """Try to extract local bounding box from IFC extrusion data without tessellation.
+    Handles IfcExtrudedAreaSolid (direct or via IfcMappedItem) with common profiles.
+    Returns (local_corners_meters, world_matrix_16) or (None, None) to signal fallback."""
+    rep = getattr(entity, 'Representation', None)
+    if not rep:
+        return (None, None)
+    # Collect all local corners from all extruded solids
+    all_local_corners = []
+    for r in rep.Representations or []:
+        for item in r.Items or []:
+            # Flatten: IfcMappedItem → expand to its mapped Items
+            solids = []
+            if item.is_a('IfcExtrudedAreaSolid'):
+                solids = [item]
+            elif item.is_a('IfcMappedItem'):
+                ms = getattr(item, 'MappingSource', None)
+                if ms:
+                    mp = getattr(ms, 'MappedRepresentation', None)
+                    if mp:
+                        for mi in mp.Items or []:
+                            if mi.is_a('IfcExtrudedAreaSolid'):
+                                solids.append(mi)
+            if not solids:
+                continue
+            for extruded in solids:
+                sa = extruded.SweptArea
+                if not sa:
+                    continue
+                # Extract profile bounding box dimensions in mm
+                w_mm = h_mm = None
+                if sa.is_a('IfcRectangleProfileDef'):
+                    w_mm = float(sa.XDim)
+                    h_mm = float(sa.YDim)
+                elif sa.is_a('IfcCircleProfileDef') or sa.is_a('IfcCircleHollowProfileDef'):
+                    d = float(sa.Radius) * 2
+                    w_mm = d
+                    h_mm = d
+                elif sa.is_a('IfcIShapeProfileDef'):
+                    w_mm = float(sa.OverallWidth)
+                    h_mm = float(sa.OverallDepth)
+                elif sa.is_a('IfcArbitraryClosedProfileDef'):
+                    oc = sa.OuterCurve
+                    if oc.is_a('IfcPolyline'):
+                        pts = oc.Points
+                        xs = [float(p.Coordinates[0]) for p in pts]
+                        ys = [float(p.Coordinates[1]) for p in pts]
+                        w_mm = max(xs) - min(xs)
+                        h_mm = max(ys) - min(ys)
+                    else:
+                        continue
+                else:
+                    continue
+                depth_mm = float(extruded.Depth)
+                pos = extruded.Position
+                axes = _extrusion_pos_axes(pos)
+                if axes is None:
+                    continue
+                x_axis, y_axis, z_axis = axes
+                loc = pos.Location.Coordinates
+                ox = float(loc[0]) / 1000.0
+                oy = float(loc[1]) / 1000.0
+                oz = float(loc[2]) / 1000.0
+                w = w_mm / 1000.0
+                h = h_mm / 1000.0
+                d = depth_mm / 1000.0
+                hw, hh = w / 2.0, h / 2.0
+                profile_corners = [
+                    (-hw, -hh,  0), (+hw, -hh,  0), (-hw, +hh,  0), (-hw, -hh,  d),
+                    (+hw, +hh,  0), (+hw, -hh,  d), (-hw, +hh,  d), (+hw, +hh,  d),
+                ]
+                for px, py, pz in profile_corners:
+                    cx = ox + x_axis[0]*px + y_axis[0]*py + z_axis[0]*pz
+                    cy = oy + x_axis[1]*px + y_axis[1]*py + z_axis[1]*pz
+                    cz = oz + x_axis[2]*px + y_axis[2]*py + z_axis[2]*pz
+                    all_local_corners.append((cx, cy, cz))
+    if not all_local_corners:
+        return (None, None)
+    matrix = _compute_world_matrix(entity)
+    if matrix is None:
+        return (None, None)
+    return (all_local_corners, matrix)
+
+def _build_info_from_bbox(local_corners, world_matrix, entity, opening_to_wall):
+    """Build element info dict from analytically-computed local corners and world matrix.
+    Produces identical output format to _process_element() post-tessellation path."""
+    info = {"global_id": entity.GlobalId, "name": entity.Name or "", "type": entity.is_a()}
+    for bt in ('IfcWall', 'IfcBeam', 'IfcColumn', 'IfcSlab', 'IfcStair', 'IfcStairFlight', 'IfcRailing', 'IfcOpeningElement'):
+        if entity.is_a(bt):
+            info["type"] = bt
+            break
+    # Extract IFC material color (same as slow path)
+    try:
+        c = _get_ifc_color(entity)
+        if c: info["color"] = c
+    except: pass
+    # Local bbox (meters → mm)
+    lx_v = [p[0] for p in local_corners]
+    ly_v = [p[1] for p in local_corners]
+    lz_v = [p[2] for p in local_corners]
+    info["localSize"] = [
+        round((max(lx_v) - min(lx_v)) * 1000),
+        round((max(ly_v) - min(ly_v)) * 1000),
+        round((max(lz_v) - min(lz_v)) * 1000),
+    ]
+    info["extrusionMin"] = [round(min(lx_v)*1000), round(min(ly_v)*1000), round(min(lz_v)*1000)]
+    info["matrix"] = world_matrix
+    # World-space bbox (meters → mm)
+    m = world_matrix
+    xs, ys, zs = [], [], []
+    for lx, ly, lz in local_corners:
+        wx = m[0]*lx + m[4]*ly + m[8]*lz  + m[12]
+        wy = m[1]*lx + m[5]*ly + m[9]*lz  + m[13]
+        wz = m[2]*lx + m[6]*ly + m[10]*lz + m[14]
+        xs.append(wx); ys.append(wy); zs.append(wz)
+    sx_w = round((max(xs) - min(xs)) * 1000)
+    sy_w = round((max(ys) - min(ys)) * 1000)
+    sz_w = round((max(zs) - min(zs)) * 1000)
+    cx_w = round((min(xs) + max(xs)) / 2 * 1000)
+    cy_w = round((min(ys) + max(ys)) / 2 * 1000)
+    cz_min = round(min(zs) * 1000)
+    cz_max = round(max(zs) * 1000)
+    # Type-specific size/pos/dir (identical logic to _process_element)
+    if info["type"] == 'IfcColumn':
+        spans = [(sx_w, min(xs)*1000, max(xs)*1000),
+                 (sy_w, min(ys)*1000, max(ys)*1000),
+                 (sz_w, cz_min, cz_max)]
+        spans.sort(key=lambda x: x[0], reverse=True)
+        height, bot, top = spans[0]
+        info["size"] = [spans[1][0], spans[2][0], height]
+        info["pos"] = [cx_w, cy_w, round(bot)]
+    elif info["type"] in ('IfcBeam', 'IfcWall'):
+        if sx_w >= sy_w:
+            info["dir"] = "x"
+            info["size"] = [sy_w, sz_w, sx_w]
+        else:
+            info["dir"] = "y"
+            info["size"] = [sx_w, sz_w, sy_w]
+        info["pos"] = [cx_w, cy_w, cz_min]
+        # isRotated & bodyZY detection
+        aligned = True
+        for ci in (0, 4, 8):
+            ax = max(abs(m[ci]), abs(m[ci+1]), abs(m[ci+2]))
+            if ax < 0.95:
+                aligned = False
+                break
+        info["isRotated"] = not aligned
+        info["bodyZY"] = m[9]
+    elif info["type"] == 'IfcOpeningElement':
+        sp = sorted([sx_w, sy_w, sz_w])
+        info["size"] = [sp[0], sp[2], sp[1]]
+        info["dir"] = "x" if sx_w >= sy_w else "y"
+        info["pos"] = [cx_w, cy_w, cz_min]
+        info["parent_wall"] = opening_to_wall.get(entity.GlobalId)
+    elif info["type"] == 'IfcSlab':
+        info["pos"] = [cx_w, cy_w, cz_min]
+        info["size"] = [sx_w, sy_w, max(sz_w, 1)]
+    else:
+        info["pos"] = [cx_w, cy_w, cz_min]
+        info["size"] = [sx_w, sy_w, sz_w]
+    # Strip trailing :number
+    info["name"] = _RE_TRAILING_ID.sub('', info["name"])
+    # Detect steel profile
+    _detect_steel_profile(info, entity)
+    # Tapered H-beams: force matrix rotation path to preserve beam slope/tilt
+    sp = info.get("steelProfile")
+    if sp and sp.get("type") == "H" and sp.get("H2") and sp["H1"] != sp["H2"]:
+        info["isRotated"] = True
+    return info
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1059,10 +1338,10 @@ class Handler(BaseHTTPRequestHandler):
 
             # Clean names: strip trailing :number
             for el in elements:
-                el["name"] = re.sub(r':\d+\s*$', '', el["name"])
+                el["name"] = _RE_TRAILING_ID_SP.sub('', el["name"])
                 if el["type"] == 'IfcBeam' and not el.get('steelProfile'):
                     w, d, _ = el["size"]
-                    el["name"] = re.sub(r'\d+x\d+', f'{w:.0f}x{d:.0f}', el["name"])
+                    el["name"] = _RE_DIMS_IN_NAME.sub(f'{w:.0f}x{d:.0f}', el["name"])
 
             ctx = LAST_IFC_CONTEXT if LAST_IFC_CONTEXT else extract_ifc_context(LAST_IFC)
             s = ctx["storeys"][0] if ctx["storeys"] else {"name": "F1"}
@@ -1214,18 +1493,23 @@ class Handler(BaseHTTPRequestHandler):
                 _send({"type": "phase", "label": f"{sn} ({', '.join(parts)}) 解析中...", "current": sent, "total": total})
 
                 batch = []
-                for e in entities:
+                for i, e in enumerate(entities):
                     info = _process_element(e, settings, opening_to_wall)
                     if info:
                         # Fix garbled name
                         if name_map and info["global_id"] in name_map:
                             info["name"] = name_map[info["global_id"]]
                         # Clean name
-                        info["name"] = re.sub(r':\d+\s*$', '', info["name"])
+                        info["name"] = _RE_TRAILING_ID_SP.sub('', info["name"])
                         if info["type"] == 'IfcBeam' and not info.get('steelProfile'):
                             w2, d2, _ = info["size"]
-                            info["name"] = re.sub(r'\d+x\d+', f'{w2:.0f}x{d2:.0f}', info["name"])
+                            info["name"] = _RE_DIMS_IN_NAME.sub(f'{w2:.0f}x{d2:.0f}', info["name"])
                         batch.append(info)
+                    # Throttled progress every 50 elements
+                    if (i + 1) % 50 == 0 or i == len(entities) - 1:
+                        _send({"type": "phase",
+                               "label": f"{sn} ({', '.join(parts)}) {i+1}/{len(entities)}",
+                               "current": sent + i + 1, "total": total})
 
                 if batch:
                     all_elements.extend(batch)

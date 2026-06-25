@@ -5,7 +5,7 @@ import urllib.request, urllib.error, json, os, sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout, 'buffer') else sys.stdout
 
 API = 'http://localhost:8765'
-TEST_IFC = 'e:/01-claudecode/Building4AI/test_office.ifc'
+TEST_IFC = 'e:/01-claudecode/Building4AI/test/test_office.ifc'
 PASS, FAIL, N = 0, 0, 0
 
 def check(name, ok, detail=''):
