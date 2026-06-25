@@ -656,7 +656,7 @@ def _process_element(e, settings, opening_to_wall):
             aligned = True
             for ci in (0, 4, 8):
                 ax = max(abs(m[ci]), abs(m[ci+1]), abs(m[ci+2]))
-                if ax < 0.95:
+                if ax < 0.999:
                     aligned = False
                     break
             info["isRotated"] = not aligned
@@ -678,6 +678,10 @@ def _process_element(e, settings, opening_to_wall):
     info["name"] = re.sub(r':\d+$', '', info["name"])
     # ── Detect H-shaped steel beams/columns from name ──
     _detect_steel_profile(info, e)
+    # Tapered H-beams: force matrix rotation path to preserve beam slope/tilt
+    sp = info.get("steelProfile")
+    if sp and sp.get("type") == "H" and sp.get("H2") and sp["H1"] != sp["H2"]:
+        info["isRotated"] = True
     return info
 
 

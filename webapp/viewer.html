@@ -444,8 +444,10 @@ function addBox(cx, cy, cz, w, h, d, el) {
     const isTapered = sp.H2 && sp.H1 !== sp.H2;
 
     if (isTapered) {
-      const flipH = el.bodyZY !== undefined && el.bodyZY < 0;
-      const H1m = (flipH ? sp.H2 : sp.H1) / 1000, H2m = (flipH ? sp.H1 : sp.H2) / 1000;
+      // Large end always at z=0 (maps to deep end of IFC bbox via extrusionMin)
+      const H_large = Math.max(sp.H1, sp.H2);
+      const H_small = Math.min(sp.H1, sp.H2);
+      const H1m = H_large / 1000, H2m = H_small / 1000;
       const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
       geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, localDepth);
     } else {
@@ -454,11 +456,14 @@ function addBox(cx, cy, cz, w, h, d, el) {
 
     // Orientation: rotated beams use R×rotM combined; others use standard rotation
     if (el.isRotated && el.matrix && el.type !== 'IfcColumn') {
-      // R: align extrusion Z → max local axis (beam length direction)
+      // R: map geometry axes to IFC local axes
+      // geo: Z=length(extrusion), Y=height(profile Y), X=width(profile X)
+      // IFC: X=beam axis(length), Z=depth(height), Y=flange width
+      // R: geo(X,Y,Z) → IFC(Y,Z,X)
       const R = new THREE.Matrix4();
       if (el.localSize) {
         const ls = el.localSize, maxI = ls.indexOf(Math.max(...ls));
-        if (maxI === 0) R.makeRotationY(Math.PI / 2);      // Z→X
+        if (maxI === 0) R.set(0,0,1,0, 1,0,0,0, 0,1,0,0, 0,0,0,1); // X→Y,Y→Z,Z→X
         else if (maxI === 1) R.makeRotationX(-Math.PI / 2); // Z→Y
       }
       // Translate geometry to align with IFC body coordinate range
@@ -552,8 +557,10 @@ function makeSteelGeometry(el, w, h, d, sp) {
   let geo;
   const isTapered = sp.H2 && sp.H1 !== sp.H2;
   if (isTapered) {
-    const flipH = el.bodyZY !== undefined && el.bodyZY < 0;
-    const H1m = (flipH ? sp.H2 : sp.H1) / 1000, H2m = (flipH ? sp.H1 : sp.H2) / 1000;
+    // Large end always at z=0 (maps to deep end of IFC bbox via extrusionMin)
+    const H_large = Math.max(sp.H1, sp.H2);
+    const H_small = Math.min(sp.H1, sp.H2);
+    const H1m = H_large / 1000, H2m = H_small / 1000;
     const Bm = sp.B / 1000, twm = sp.tw / 1000, tfm = sp.tf / 1000;
     geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, extrudeDepth);
   } else {
