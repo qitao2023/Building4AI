@@ -452,6 +452,8 @@ function addBox(cx, cy, cz, w, h, d, el) {
       geo = createTaperedHGeometry(H1m, H2m, Bm, twm, tfm, localDepth);
     } else {
       geo = makeSteelExtrusion(sp, localDepth);
+      // Shift top to Y=0 (IFC convention: beam axis at top of section)
+      geo.translate(0, -(sp.H || sp.H1 || 0) / 2000, 0);
     }
 
     // Orientation: rotated beams use R×rotM combined; others use standard rotation
@@ -494,6 +496,24 @@ function addBox(cx, cy, cz, w, h, d, el) {
     const center = new THREE.Vector3();
     geo.boundingBox.getCenter(center);
     geo.translate(-center.x, -center.y, -center.z);
+
+    // For rotated beams: use matrix translation for exact positioning.
+    // Geometry has top at Y=0, but bbox center is shifted by ~H/2 in IFC Z.
+    if (el.isRotated && el.matrix && el.type !== 'IfcColumn') {
+      const ls = el.localSize;
+      const maxI = ls.indexOf(Math.max(...ls));
+      const localDepth = Math.max(...ls) / 1000;
+      const off = el.extrusionMin[maxI] / 1000 + localDepth / 2;
+      // IFC center Z offset (H-type only): shallow end depth
+      let ifcCenterZ = 0;
+      if (sp.type === 'H') {
+        const H1 = sp.H1 || sp.H, H2 = sp.H2 || sp.H;
+        ifcCenterZ = -Math.min(H1, H2) / 2000;
+      }
+      cx = el.matrix[12] + off * el.matrix[0];
+      cy = el.matrix[14] + off * el.matrix[2] + ifcCenterZ * el.matrix[10];
+      cz = -el.matrix[13] - off * el.matrix[1];
+    }
   } else {
     geo = new THREE.BoxGeometry(w, h, d);
   }
@@ -582,25 +602,24 @@ function makeSteelGeometry(el, w, h, d, sp) {
 
 function createTaperedHGeometry(H1, H2, B, tw, tf, length) {
   // All in meters. H1=large end height, H2=small end height
-  // Creates H-shape cross-section at z=0 (large) and z=length (small) with side faces + end caps
+  // Top flange at Y=0 (matches IFC convention: beam axis at top of section)
   const hB = B / 2, htw = tw / 2;
 
-  // 12 outline vertices (x,y,z triplets) for one H-shape end
   function ov(Hh, zPos) {
-    const hH = Hh / 2;
+    // Y: bottom at -Hh, top at 0 (instead of centered at ±Hh/2)
     return [
-       hB, -hH, zPos,         // 0: bottom-right
-      -hB, -hH, zPos,         // 1: bottom-left
-      -hB, -hH + tf, zPos,    // 2: b.flange left-top
-      -htw,-hH + tf, zPos,    // 3: web left-bottom
-      -htw, hH - tf, zPos,    // 4: web left-top
-      -hB,  hH - tf, zPos,    // 5: t.flange left-bottom
-      -hB,  hH, zPos,         // 6: top-left
-       hB,  hH, zPos,         // 7: top-right
-       hB,  hH - tf, zPos,    // 8: t.flange right-bottom
-       htw, hH - tf, zPos,    // 9: web right-top
-       htw,-hH + tf, zPos,    // 10: web right-bottom
-       hB, -hH + tf, zPos,    // 11: b.flange right-top
+       hB, -Hh, zPos,         // 0: bottom-right
+      -hB, -Hh, zPos,         // 1: bottom-left
+      -hB, -Hh + tf, zPos,    // 2: b.flange left-top
+      -htw,-Hh + tf, zPos,    // 3: web left-bottom
+      -htw, -tf, zPos,        // 4: web left-top (just below top flange)
+      -hB,  -tf, zPos,        // 5: t.flange left-bottom
+      -hB,  0, zPos,          // 6: top-left
+       hB,  0, zPos,          // 7: top-right
+       hB,  -tf, zPos,        // 8: t.flange right-bottom
+       htw, -tf, zPos,        // 9: web right-top
+       htw,-Hh + tf, zPos,    // 10: web right-bottom
+       hB, -Hh + tf, zPos,    // 11: b.flange right-top
     ];
   }
 
@@ -664,7 +683,6 @@ function getBox(el) {
       // Only use profile height if bbox Z span is not dominated by beam length (vertical)
       if (profH > 0 && bh < profH * 3) bh = profH;
     }
-    // Tilted beams: position uses world Z span (includes tilt projection), not profile height
     const posH = (el.isRotated && sp3) ? bhWorld : bh;
     if (dir === 'y') { w = bw; h = bh; d = bl; cx = mx; cy = my + posH / 2; cz = mz; }
     else             { w = bl; h = bh; d = bw; cx = mx; cy = my + posH / 2; cz = mz; }
